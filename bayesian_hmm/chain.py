@@ -24,102 +24,109 @@ import numpy as np
 import random
 import copy
 
-# Shorthand for numeric types.
+# shorthand for numeric types
 Numeric = Union[int, float]
 
-# Oft-used dictionary initializations with shorthands.
+# oft-used dictionary initializations with shorthands
 DictStrNum = Dict[Optional[str], Numeric]
 InitDict = DictStrNum
 DictStrDictStrNum = Dict[Optional[str], DictStrNum]
 NestedInitDict = DictStrDictStrNum
 
 
-# Chain stores a single markov emission sequence plus associated latent variables
+# chain stores a single markov emission sequence plus associated latent variables
 class Chain(object):
+    
     """
-    Store observed emission sequence and current latent sequence for a HMM.
+    Store observed emission sequence and current latent sequence for an HMM.
     """
 
     def __init__(self, sequence: List[Optional[str]]) -> None:
+        
         """
         Create a Hidden Markov Chain for an observed emission sequence.
         :param sequence: iterable containing observed emissions.
         """
+        
         # initialise & store sequences
+        
+        ### self.emission_sequence as deep copy of original sequence object
         self.emission_sequence: List[Optional[str]] = copy.deepcopy(sequence)
+        ### self.latent_sequence as list of None objects for each item in sequence
         self.latent_sequence: List[Optional[str]] = [None for _ in sequence]
 
-        # calculate dependent hyperparameters
+        # self.T as length of emission_sequence
         self.T = len(self.emission_sequence)
 
         # keep flag to track initialisation
         self._initialised_flag = False
 
     def __len__(self) -> int:
+        
         return self.T
 
     @property
     def initialised_flag(self) -> bool:
+        
         """
         Test whether a Chain is initialised.
         :return: bool
         """
+        
         return self._initialised_flag
 
     @initialised_flag.setter
     def initialised_flag(self, value: bool) -> None:
+        
         if value is True:
-            raise RuntimeError(
-                "Chain must be initialised through initialise_chain method"
-            )
+            raise RuntimeError("Chain must be initialised through initialise_chain method")
         elif value is False:
             self._initialised_flag = False
         else:
             raise ValueError("initialised flag must be Boolean")
 
     def __repr__(self) -> str:
+        
         return "<bayesian_hmm.Chain, size {0}>".format(self.T)
 
     def __str__(self, print_len: int = 15) -> str:
+        
         print_len = min(print_len - 1, self.T - 1)
-        return "bayesian_hmm.Chain, size={T}, seq={s}".format(
-            T=self.T,
-            s=[
-                "{s}:{e}".format(s=s, e=e)
-                for s, e in zip(self.latent_sequence, self.emission_sequence)
-            ][:print_len]
-            + ["..."],
-        )
+        return "bayesian_hmm.Chain, size={T}, seq={s}".format(T=self.T,
+                                                              s=["{s}:{e}".format(s=s, e=e)
+                                                                 for s, e in zip(self.latent_sequence, self.emission_sequence)][:print_len] + ["..."],)
 
     def tabulate(self) -> np.array:
+        
         """
         Convert the latent and emission sequences into a single numpy array.
-        :return: numpy array with shape (l, 2), where l is the length of the Chain
+        :return: numpy array with shape (n, 2), where n is the length of the chain
+        e.g.: [[state_name,emission],[state_name,emission]]
         """
-        return np.column_stack(
-            (copy.copy(self.latent_sequence), copy.copy(self.emission_sequence))
-        )
+        
+        return np.column_stack((copy.copy(self.latent_sequence), copy.copy(self.emission_sequence)))
 
-    # introduce randomly sampled states for all latent variables in Chain
     def initialise(self, states: Sequence) -> None:
+        
         """
+        Introduce randomly sampled states for all latent variables in chain.
         Initialise the chain by sampling latent states.
         Typically called directly from an HDPHMM object.
         :param states: set of states to sample from
         :return: None
         """
-        # create latent sequence
+        
+        # overwrite list of Nones with random choices from states argument
         self.latent_sequence = random.choices(states, k=self.T)
 
-        # update observations
+        # update _initialised_flag to True
         self._initialised_flag = True
 
-    def neglogp_chain(
-        self,
-        p_initial: InitDict,
-        p_emission: NestedInitDict,
-        p_transition: NestedInitDict,
-    ) -> Numeric:
+    def neglogp_chain(self,
+                      p_initial: InitDict,
+                      p_emission: NestedInitDict,
+                      p_transition: NestedInitDict,) -> Numeric:
+        
         """
         Negative log likelihood of the Chain, using the given parameters.
         Usually called with parameters given by the parent HDPHMM object.
@@ -128,6 +135,7 @@ class Chain(object):
         :param p_transition: dict, transition probabilities
         :return: float
         """
+        
         # edge case: zero-length sequence
         if self.T == 0:
             return 0
