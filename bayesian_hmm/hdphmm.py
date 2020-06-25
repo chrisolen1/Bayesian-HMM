@@ -56,10 +56,10 @@ class HDPHMM(object):
 
     def __init__(self,
                  emission_sequences: Iterable[List[Optional[str]]],
-                 emissions=None,  # type: ignore
-                 # emissions: Optional[Iterable[Union[str, int]]] = None # ???
+                 emissions=None, 
+                 state_distributions="dirichlet_process",
                  sticky: bool = True,
-                 priors: Dict[str, Callable[[], Any]] = None,) -> None:
+                 priors: Dict[str, Callable[[], Any]] = None) -> None:
         
         """
         Create a Hierarchical Dirichlet Process Hidden Markov Model object, which can
@@ -92,13 +92,17 @@ class HDPHMM(object):
             when estimating beta coefficients. That is, higher values of gamma mean the
             HMM is more likely to explore new states when resampling.
           + alpha_emission: prior distribution of the alpha parameter for the
-            emission prior distribution. Alpha controls how tightly the conditional
+            dirichlet process emission prior distribution. Alpha controls how tightly the conditional
             emission distributions follow their hierarchical prior. Hence, higher values
             of alpha_emission mean more strength in the hierarchical prior.
           + gamma_emission: prior distribution of the gamma parameter for the
-            emission prior distribution. Gamma controls the strength of the
+            dirichlet process emission prior distribution. Gamma controls the strength of the
             uninformative prior in the emission distribution. Hence, higher values of
             gamma mean more strength of belief in the prior.
+          + theta_emission: prior distribution of the location parameter of the 
+            latent variable prior distributions, if not using dirichlet process prior.
+          + sigma emission: prior distribution of the scale parameter of the latent variable 
+            prior distributions, if not using dirichlet process prior.
           + kappa: prior distribution of the kappa parameter for the
             self-transition probability. Ignored if `sticky==False`. Kappa prior should
             have support in (0, 1) only. Higher values of kappa mean the chain is more
@@ -113,11 +117,17 @@ class HDPHMM(object):
             raise ValueError("`sticky` must be type bool")
         self.sticky = sticky
 
+        self.state_distributions = state_distributions
+
         # store hyperparameter priors
+        # may want to use maximum likelihood value to inform 
+        # theta and sigma priors 
         self.priors = {"alpha": lambda: np.random.gamma(2, 2),
         "gamma": lambda: np.random.gamma(3, 3),
         "alpha_emission": lambda: np.random.gamma(2, 2),
         "gamma_emission": lambda: np.random.gamma(3, 3),
+        "theta_emission": lambda: np.random.normal(0, 5),
+        "sigma_emission": lambda: np.random.gamma(1, 5),
         "kappa": lambda: np.random.beta(1, 1)}
 
         ### RETURN TO THIS ###
@@ -368,11 +378,16 @@ class HDPHMM(object):
             update emission probabilities
             """
             
-            ### RETURN TO THIS ### is this really how we determine emissions probabilities for a state??? or
-            ### Dirichlet process for creating emissions probabilities for each possible emission for each state 
-            temp_p_emission = np.random.dirichlet([self.hyperparameters["alpha"] * self.beta_emission[e] for e in self.emissions])
-            ### for the new state, zip resulting emissions probability with the emission itself
-            self.p_emission[label] = dict(zip(self.emissions, temp_p_emission))
+            if self.state_distributions == "empirical":
+
+                ### Dirichlet process for creating emissions probabilities for each possible emission for each state 
+                temp_p_emission = np.random.dirichlet([self.hyperparameters["alpha"] * self.beta_emission[e] for e in self.emissions])
+                ### for the new state, zip resulting emissions probability with the emission itself
+                self.p_emission[label] = dict(zip(self.emissions, temp_p_emission))
+
+            elif self.state_distributions == "gaussian":
+
+
 
             # save generated label to state dict
             self.states = self.states.union({label})
@@ -619,7 +634,13 @@ class HDPHMM(object):
         euler_constant = 0.5772156649
         # ordered pair of states (i.e. state1 transitions to state2)
         state1, state2 = state_pair
+        # indicator variable for self-transition
+        if state1 == state2:
+            delta = 1
+        else:
+            delta = 0
         
+        # don't return anything higher than m_curr
         if m_curr > n_jk:
             
             return m_proposed
@@ -627,9 +648,9 @@ class HDPHMM(object):
         # find relative probabilities
         if not use_approximation:
 
-            p_curr = float(stirling(n_jk, m_curr, kind=1)) * (ab_k ** m_curr)
-            p_proposed = float(stirling(n_jk, m_proposed, kind=1)) * (ab_k ** m_proposed)
-            logp_diff = np.log(p_proposed) - np.log(p_curr)
+            p_curr = float(stirling(n_jk, m_curr, kind=1)) * ((ab_k + (self.hyperparameters["kappa"]*delta)) ** m_curr)
+            p_proposed = float(stirling(n_jk, m_proposed, kind=1)) * ((ab_k + (self.hyperparameters["kappa"]*delta)) ** m_proposed)
+            
     """
         DONT UNDERSTAND THE MATH HERE 
         else:
@@ -644,12 +665,21 @@ class HDPHMM(object):
 
         # use MH variable to decide whether to accept m_proposed
         with catch_warnings(record=True) as caught_warnings:
-            p_accept = min(1, np.exp(logp_diff))
-            p_accept = bool(np.random.binomial(n=1, p=p_accept))  # convert to boolean
-            if caught_warnings:
-                p_accept = True
 
-        return m_proposed if p_accept else m_curr
+            if p_proposed > p_curr:
+
+                return p_proposed
+
+            else:
+
+                p_accept = np.log(p_proposed) - np.log(p_curr)
+                result = bool(np.random.binomial(n=1, p=p_accept))  
+                
+            if caught_warnings:
+                
+                result = True
+
+        return m_proposed if result else m_curr
 
     @staticmethod
     def _resample_auxiliary_transition_atom(state_pair,
@@ -1075,33 +1105,16 @@ class HDPHMM(object):
         new_initial_prob_density = np.log(stats.dirichlet.pdf([self.p_initial[s] for s in dir_posterior_params_initial.keys()],
                 [dir_posterior_params_initial[s] for s in dir_posterior_params_initial.keys()]))
         
-        return ll_initial
+        return new_initial_prob_density
 
     def _get_p_transition_metaparameters(self, state):
         
-        if self.sticky:
-            
-            # counting number of times we ate at restaurant state 
-            # and ordered dish s2, meaning we transitioned from 
-            # state to s2
-            dir_posterior_params_pi_k = {s2: self.n_transition[state][s2]
-                + (self.hyperparameters["alpha"] * (1 - self.hyperparameters["kappa"]) * self.beta_mixture_variables[s2])
-                for s2 in self.states}
+        kappa = self.hyperparameters["kappa"] 
+        alpha = self.hyperparameters["alpha"]
 
-            dir_posterior_params_pi_k[None] = (self.hyperparameters["alpha"]
-                * (1 - self.hyperparameters["kappa"])
-                * self.beta_mixture_variables[None])
-
-            # adding kappa back into the self transition; this seems like an odd way to do this 
-            dir_posterior_params_pi_k[state] += (self.hyperparameters["alpha"] * self.hyperparameters["kappa"])
-        
-        else:
-            
-            dir_posterior_params_pi_k = {s2: self.n_transition[state][s2]
-                + self.hyperparameters["alpha"] * self.beta_mixture_variables[s2]
-                for s2 in self.states}
-
-            dir_posterior_params_pi_k[None] = self.hyperparameters["alpha"] * self.beta_mixture_variables[None]
+        dir_posterior_params_pi_k = dict((s2, self.n_transition[state][s2] + (alpha * self.beta_mixture_variables[s2]) + kappa) \
+            if state == s2 \
+            else (s2, self.n_transition[state][s2] + (alpha * self.beta_mixture_variables[s2])) for s2 in self.states)
 
         return dir_posterior_params_pi_k
 
