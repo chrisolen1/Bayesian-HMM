@@ -164,11 +164,12 @@ class HDPHMM(object):
         self.auxiliary_transition_variables: NestedInitDict
         self.auxiliary_transition_variables = {None: {None: 0}}
         ### possibly beta outputs of Dirichlet stick-breaking ???
-        self.beta_transition = {None: 1}
-        self.beta_transition: InitDict
+        self.beta_mixture_variables: InitDict
+        self.beta_mixture_variables = {None: 1}
         ### RETURN TO THIS ###
-        self.beta_emission = {None: 1}
         self.beta_emission: InitDict
+        self.beta_emission = {None: 1}
+        
 
         ### RETURN TO THIS ###
         # states & emissions
@@ -314,15 +315,15 @@ class HDPHMM(object):
                
 
             """
-            update beta_transition values via Dirichlet stick-breaking
+            update beta_mixture_variables values via Dirichlet stick-breaking
             """
             
             ### Dirichlet stick-breaking: produce temp beta value using beta(1, gamma) from gamma prior
             temp_beta = np.random.beta(1, self.hyperparameters["gamma"])
             ### new beta for new state = temp_beta * old beta for None
-            self.beta_transition[label] = temp_beta * self.beta_transition[None]
+            self.beta_mixture_variables[label] = temp_beta * self.beta_mixture_variables[None]
             ### new beta for None = (1 - temp_beta) * old beta for None
-            self.beta_transition[None] = (1 - temp_beta) * self.beta_transition[None]
+            self.beta_mixture_variables[None] = (1 - temp_beta) * self.beta_mixture_variables[None]
 
 
             ### RETURN TO THIS ###: Is this really how we determine initial state prob?
@@ -340,8 +341,8 @@ class HDPHMM(object):
             """
             
             ### RETURN TO THIS ### do we not want to factor in alpha's and kappas here?
-            ### transition probabilities from new state to other states based on betas (i.e. average transition probabilities)
-            temp_p_transition = np.random.dirichlet([self.beta_transition[s] for s in list(self.states) + [label, None]]) 
+            ### transition probabilities from new state to other states based on beta_mixture_variables (i.e. average transition probabilities)
+            temp_p_transition = np.random.dirichlet([self.beta_mixture_variables[s] for s in list(self.states) + [label, None]]) 
             ### zipping state names and resulting transition probabilities
             p_transition_label = dict(zip(list(self.states) + [label, None], temp_p_transition))
             ### adding shrunk probabilities to p_transition under key of the new state
@@ -408,10 +409,10 @@ class HDPHMM(object):
         
         ### order L weak limit approximation to the Dirichlet process mixture where L = self.k in this case 
         temp_beta = sorted(np.random.dirichlet([self.hyperparameters["gamma"] / (self.k + 1)] * (self.k + 1)), reverse=True)
-        ### create dictionary of betas with corresponding state names
-        beta_transition = dict(zip(list(self.states) + [None], temp_beta))
+        ### create dictionary of beta_mixture_variables with corresponding state names
+        beta_mixture_variables = dict(zip(list(self.states) + [None], temp_beta))
         ### and shrink probabilities
-        self.beta_transition = shrink_probabilities(beta_transition)
+        self.beta_mixture_variables = shrink_probabilities(beta_mixture_variables)
         ### set aux_transition from each state to each other equal to 1
         self.auxiliary_transition_variables = {s1: {s2: 1 for s2 in self.states.union({None})} for s1 in self.states.union({None})}
 
@@ -419,7 +420,7 @@ class HDPHMM(object):
         self.update_counts()
 
         # resample remaining hyperparameters
-        self.resample_beta_transition()
+        self.resample_beta_mixture_variables()
         self.resample_beta_emission()
         self.resample_p_initial()
         self.resample_p_transition()
@@ -445,7 +446,7 @@ class HDPHMM(object):
         # remove relevant key:values from prop dicts and add prob to aggregate None state
         for state in states_removed:
 
-            self.beta_transition[None] += self.beta_transition.pop(state)
+            self.beta_mixture_variables[None] += self.beta_mixture_variables.pop(state)
             self.p_initial[None] += self.p_initial.pop(state)
             for s1 in states_next.union({None}):
                 self.p_transition[s1][None] += self.p_transition[s1].pop(state)
@@ -499,10 +500,11 @@ class HDPHMM(object):
         self.n_transition = n_transition
 
     @staticmethod
-    def _resample_auxiliary_transition_atom_complete(alpha, 
-                                                     beta, 
-                                                     n_jk, 
-                                                     use_approximation=True):
+    def exact_resample_aux_transition_counts(alpha,
+                                            beta,
+                                            n_jk,
+                                            use_approximation=True,
+                                            state_pair):
         
         """
         Use a resampling approach that estimates probabilities for all auxiliary
@@ -529,21 +531,30 @@ class HDPHMM(object):
         ab_k = alpha * beta
         # euler constant if approximation necessary
         euler_constant = 0.5772156649
-
+        # ordered pair of states (i.e. state1 transitions to state2)
+        state1, state2 = state_pair
+        # indicator variable for self-transition
+        if state1 == state2:
+            delta = 1
+        else:
+            delta = 0
 
         # use precise probabilities
         if not use_approximation:
             
             try:
                 
-                log_gamma_constant = np.log(special.gamma(ab_k)) - np.log(special.gamma(ab_k + n_jk))
+                log_gamma_constant = np.log(special.gamma(ab_k + (self.hyperparameters["kappa"]*delta))) 
+                                    - np.log(special.gamma(ab_k + (self.hyperparameters["kappa"]*delta) + n_jk))
                 
                 # continue while cumulative_prob < requirement AND 
                 # m (# of tables in rest) < n (number of customers in rest)
                 while cumulative_prob < required_prob and m < n:
                     
                     # adding log-transformed terms
-                    density = log_gamma_constant + np.log(stirling(n_jk, m, kind=1)) + (m * np.log(ab_k))
+                    density = log_gamma_constant 
+                            + np.log(stirling(n_jk, m, kind=1)) 
+                            + (m * np.log(ab_k + (self.hyperparameters["kappa"]*delta)))
                     # adding resulting p(mjk = m | z, m-jk, b) to cumulative_prob
                     cumulative_prob += np.exp(density)
                     # increment m by one
@@ -577,14 +588,15 @@ class HDPHMM(object):
         """
         # breaks out of loop after m is sufficiently large
         return max(m, 1)
-        
+    
 
     @staticmethod
-    def _resample_auxiliary_transition_atom_mh(alpha, 
-                                               beta, 
-                                               n_jk, 
-                                               m_curr, 
-                                               use_approximation=True):
+    def mh_resample_aux_transition_counts(alpha,
+                                        beta,
+                                        n_jk,
+                                        m_curr,
+                                        use_approximation=True,
+                                        state_pair):
         """
         Use a Metropolos Hastings resampling approach that often rejects the proposed
         value. This can cause the convergence to slow down (as the values are less
@@ -605,6 +617,8 @@ class HDPHMM(object):
         ab_k = alpha * beta
         # euler constant if approximation necessary
         euler_constant = 0.5772156649
+        # ordered pair of states (i.e. state1 transitions to state2)
+        state1, state2 = state_pair
         
         if m_curr > n_jk:
             
@@ -644,7 +658,7 @@ class HDPHMM(object):
                                             n_initial,
                                             n_transition,
                                             auxiliary_transition_variables,
-                                            resample_type="mh",
+                                            resample_type="exact",
                                             use_approximation=True):
         
         """
@@ -653,7 +667,7 @@ class HDPHMM(object):
         parallelised resampling.
         :param state_pair: ordered pair of states
         :param alpha: param drawn from the alpha prior
-        :param beta: betas from Dirichlet stick-breaking
+        :param beta: beta_mixture_variables from Dirichlet stick-breaking
         :param n_initial: n_initial class object
         :param n_transition: n_transition class object
         :param auxiliary_transition_variables: auxiliary_transition_variables class object
@@ -662,7 +676,7 @@ class HDPHMM(object):
         :return:
         """
 
-        # ordered pair of states (i.e. state1 transitions to state 2)
+        # ordered pair of states (i.e. state1 transitions to state2)
         state1, state2 = state_pair
 
         # apply resampling if 'mh' == True
@@ -671,42 +685,247 @@ class HDPHMM(object):
         	# we focus on instances where state2 is the initial state OR
         	# when transitioning from state1 to state2
             # i.e. when state2 is the dish served per CRF
-            return HDPHMM._resample_auxiliary_transition_atom_mh(alpha,
-                                                                 beta[state2],
-                                                                 n_initial[state2] + n_transition[state1][state2],
-                                                                 auxiliary_transition_variables[state1][state2],
-                                                                 use_approximation)
+            return HDPHMM.mh_resample_aux_transition_counts(alpha,
+                                                            beta[state2],
+                                                            n_initial[state2] + n_transition[state1][state2],
+                                                            auxiliary_transition_variables[state1][state2],
+                                                            use_approximation,
+                                                            state_pair)
         # apply resampling if 'complete' == True
-        elif resample_type == "complete":
+        elif resample_type == "exact":
             
             # we focus on instances where state2 is the initial state OR
         	# when transitioning from state1 to state2
             # i.e. when state2 is the dish served per CRF
         	# Note: This approach does not use aux vars
-            return HDPHMM._resample_auxiliary_transition_atom_complete(alpha,
-                                                                       beta[state2],
-                                                                       n_initial[state2] + n_transition[state1][state2],
-                                                                       use_approximation)
+            return HDPHMM.exact_resample_aux_transition_counts(alpha,
+                                                                beta[state2],
+                                                                n_initial[state2] + n_transition[state1][state2],
+                                                                use_approximation,
+                                                                state_pair)
         
         else:
             raise ValueError("resample_type must be either mh or complete")
+
+    def crp_resample_aux_transition_counts(self):
+        
+        """
+        For large n_jk, it is often more efficient to sample m_jk by simulating table 
+        assignments of the Chinese restaurant, rather than having to compute a large
+        array of Stirling numbers. Having the state index assignments z1:T effectively
+        partitions the data (customers) into both restaurants and dishes, though the table 
+        assignments are unknown since multiple tables can be served the same dish. Thus,
+        sampling m_jk is in effect requivalent to sampling table assignments for each 
+        customer AFTER knowing the dish assignment
+        :return:
+        """
+        
+        # establish empty dict for counting the number of separate tables per state in each restaurant
+        # eventually will take the form {restaurant: dish: table_number: num_customers}
+        tables = {}
+        # store alpha
+        alpha = self.hyperparameters['alpha']
+        kappa = self.hyperparameters['kappa']
+        
+        # iterate through chains one at a time 
+        for chain in self.chains:
+
+            # if initial state, it automatically get its own table with probabiity 1
+            init_dish = chain.latent_sequence[0]
+            tables.update({init_dish: {init_dish: {1: 1}}})
+
+            # go state by state in the latent sequence
+            for t in range(1, len(chain.latent_sequence)):
+
+                # get the current and previous state names
+                prev_dish = chain.latent_sequence[t-1]
+                current_dish = chain.latent_sequence[t]
+
+                # if no one has ordered the current dish in the current restaurant
+                if current_dish not in tables[prev_dish].keys():
+
+                    # it automatically gets a table
+                    tables.update({prev_dish: {current_dish: {1: 1}}})
+
+                else:
+
+                    # get the index of the table in the current restaurant (i.e. prev_dish)
+                    # which most recently chose the current_dish
+                    d = tables[prev_dish][current_dish]
+                    od = collections.OrderedDict(sorted(d.items()))
+                    latest_table_index = list(od.items())[-1][0]
+                    # and then find the number of customers sitting at that tables
+                    n_jt = tables[prev_dish][current_dish][latest_table_index]
+                    
+                    # get beta and kappa (if self-transition) for the current dish
+                    beta_k = self.beta_mixture_variables[current_dish]
+                    if prev_dish == current_dish:
+                        delta = 1
+                    else:
+                        delta = 0
+                    new_table_weight = alpha*beta_k + delta*kappa
+
+                    # make random draw to decide whether to sit at existing or new tables
+                    result = random.choices(('old_table','new_table'), weights=(n_jt, new_table_weight))[0]
+
+                    # if we stay at the existing table
+                    if result == 'old_table':
+
+                        # add one customer the table that last ordered the current_dish
+                        # in the restaurant we're currently in 
+                        tables[prev_dish][current_dish][latest_table_index] += 1
+
+                    else:
+
+                        # else, create a new table in the restaurant for our current dish
+                        # and add a customer 
+                        new_latest_index = latest_table_index + 1
+                        tables[prev_dish][current_dish][new_latest_index] = 1
+
+            # now time to update the auxiliary_transition_variable class variable
+            # for each restaurant key in aux_trans_var
+            for restaurant in self.auxiliary_transition_variables:
+
+                # for each dish key in each restaurant
+                for dish in self.auxiliary_transition_variables[restaurant]:
+
+                    # set the aux_tran_var restaurant-dish pair equal to the number
+                    # of distinct tables in that restaurant serving that dish (i.e. m_jk)
+                    self.auxiliary_transition_variables[restaurant][dish] = len(tables[restaurant][dish].keys())
+
+    def gem_resample_aux_transition_counts(self):
+
+        """
+        For large n_jk, it is often more efficient to sample m_jk by simulating table 
+        assignments of the Chinese restaurant, rather than having to compute a large
+        array of Stirling numbers. The form used for the CRP above implies that a 
+        customer's table assignment conditioned on a dish assignment k follows a 
+        Dirichlet process with concentration parameter alpha*beta_k + kappa•delta(k,j)
+        such that  t_ji ~ GEM(alpha*beta_k + kappa•delta(k,j))
+
+        :return:
+        """
+
+        alpha = self.hyperparameters['alpha']
+        kappa = self.hyperparameters['kappa']
+
+        # initial a separate probability stick for each state (i.e. dish)
+        # where None currently occupies the totality of the density 
+        dish_sticks = {dish: {None: 1} for dish in self.states}
+
+        # iterate through chains one at a time 
+        for chain in self.chains:
+
+            # go state by state in the latent sequence
+            for t in range(len(chain.latent_sequence)):
+
+                # self-transition is not possible for initial state in the chain
+                if t == 0:
+
+                    dish = chain.latent_sequence[t]
+
+                        # if this is the first stick-break for this particular dish
+                        # we'll automatically break a pice off of None with probability 1
+                        if len(dish_sticks[dish].keys()) == 1:
+
+                            # note: we leave out kappa given self-transition not possible
+                            temp_p = np.random.beta(1, alpha * self.beta_mixture_variables[dish])
+                            # create new table for this dish with segment length dish_sticks[dish][None] * temp_p
+                            dish_sticks[dish][1] = dish_sticks[dish][None] * temp_p
+                            # remainder of the segment length goes to None
+                            dish_sticks[dish][None] = dish_sticks[dish][None] * (1 - temp_p)
+
+                        else:
+
+                            # pull the penultimate segment index for the current_dish
+                            # (i.e. up until None)
+                            d = dish_sticks[current_dish]
+                            latest_table_index = list(d.items())[-1][0]
+                            # sum up the segmented density up, excluding None density, which is
+                            # the first index
+                            segmented_density = sum(list(dish_sticks[current_dish].values())[1:])
+                            # make a uniform draw from 0 to 1
+                            draw = random.uniform(0,1)
+
+                            # if draw puts us passed the segmented density of the stick
+                            if draw > segmented_density:
+
+                                # break off a new segment
+                                # note: we leave out kappa given self-transition not possible
+                                temp_p = np.random.beta(1, alpha * self.beta_mixture_variables[dish])
+                                # create new table for this dish with segment length dish_sticks[dish][None] * temp_p
+                                dish_sticks[dish][latest_table_index+1] = dish_sticks[dish][None] * temp_p
+                                # remainder of the segment length goes to None
+                                dish_sticks[dish][None] = dish_sticks[dish][None] * (1 - temp_p)
+
+
+                # this is where we started to incorporate kappa
+                else:
+
+                    previous_dish = chain.latent_sequence[t-1]
+                    current_dish = chain.latent_sequence[t]
+
+                    if current_dish == previous_dish:
+                        delta = 1
+                    else:
+                        delta = 
+
+                    # pull the penultimate segment index for the current_dish
+                            # (i.e. up until None)
+                            d = dish_sticks[current_dish]
+                            latest_table_index = list(d.items())[-1][0]
+                            # sum up the segmented density up, excluding None density, which is
+                            # the first index
+                            segmented_density = sum(list(dish_sticks[current_dish].values())[1:])
+                            # make a uniform draw from 0 to 1
+                            draw = random.uniform(0,1)
+
+                            # if draw puts us passed the segmented density of the stick
+                            if draw > segmented_density:
+
+                                # break off a new segment
+                                # note: we leave out kappa given self-transition not possible
+                                temp_p = np.random.beta(1, (alpha * self.beta_mixture_variables[dish]) + (kappa * delta))
+                                # create new table for this dish with segment length dish_sticks[dish][None] * temp_p
+                                dish_sticks[dish][latest_table_index+1] = dish_sticks[dish][None] * temp_p
+                                # remainder of the segment length goes to None
+                                dish_sticks[dish][None] = dish_sticks[dish][None] * (1 - temp_p)
+ 
+        # make resulting dish_sticks dict a class variable
+        self.dish_sticks = dish_sticks
+
+    ### transition probabilities from new state to other states based on beta_mixture_variables (i.e. average transition probabilities)
+            temp_p_transition = np.random.dirichlet([self.beta_mixture_variables[s] for s in list(self.states) + [label, None]]) 
+            ### zipping state names and resulting transition probabilities
+            p_transition_label = dict(zip(list(self.states) + [label, None], temp_p_transition))
+            ### adding shrunk probabilities to p_transition under key of the new state
+            self.p_transition[label] = shrink_probabilities(p_transition_label, eps)
+
+        for state in self.states.union({None}):
+                
+                ### draw from gamma prior
+                temp_p_transition = np.random.beta(1, self.hyperparameters["gamma"])
+                ### new p_transition from other state to new state = temp_beta * old p_transition from other state to None 
+                self.p_transition[state][label] = (self.p_transition[state][None] * temp_p_transition)
+                ### new p_transition from other state to None = (1 - temp_beta) * old p_transition from other state to None 
+                self.p_transition[state][None] = self.p_transition[state][None] * (1 - temp_p_transition)    
 
     # TODO: decide whether to use either MH resampling or approximation sampling and
     # remove the alternative, unnecessary complexity in code
     def _resample_auxiliary_transition_variables(self, 
                                                  ncores=1, 
-                                                 resample_type="mh", 
+                                                 resample_type="exact", 
                                                  use_approximation=True):
         
         # non-multithreaded process uses typical list comprehension
-        if ncores < 2:
+        if ncores < 2 and resample_type == "mh" or resample_type == "exact":
             
             # iterate over all possible markov transition permutations of states and send then them through
             # the _resample_auxiliary_transition_atom function
             # updates aux_trans_var m_jk based on estimate
             self.auxiliary_transition_variables = {s1: {s2: HDPHMM._resample_auxiliary_transition_atom((s1, s2),
                 													alpha=self.hyperparameters["alpha"],
-                													beta=self.beta_transition,
+                													beta=self.beta_mixture_variables,
                 													n_initial=self.n_initial,
                 													n_transition=self.n_transition,
                 													auxiliary_transition_variables=self.auxiliary_transition_variables,
@@ -715,7 +934,7 @@ class HDPHMM(object):
             										for s2 in self.states} for s1 in self.states}
 
         # parallel process uses anonymous functions and mapping
-        else:
+        elif ncores > 2 and resample_type == "mh" or resample_type == "exact":
 
             # specify ordering of states
             state_pairs = [(s1, s2) for s1 in self.states for s2 in self.states]
@@ -723,7 +942,7 @@ class HDPHMM(object):
             # parallel process resamples
             resample_partial = functools.partial(HDPHMM._resample_auxiliary_transition_atom,
                 							alpha=self.hyperparameters["alpha"],
-                							beta=self.beta_transition,
+                							beta=self.beta_mixture_variables,
                 							n_initial=self.n_initial,
                 							n_transition=self.n_transition,
                 							auxiliary_transition_variables=self.auxiliary_transition_variables,
@@ -737,10 +956,19 @@ class HDPHMM(object):
             # store as dictionary
             for pair_n in range(len(state_pairs)):
                 state1, state2 = state_pairs[pair_n]
-                self.auxiliary_transition_variables[state1][
-                    state2] = auxiliary_transition_variables[pair_n]
+                self.auxiliary_transition_variables[state1][state2] = auxiliary_transition_variables[pair_n]
 
-    def _get_beta_transition_metaparameters(self):
+        elif resample_type == "crp":
+
+            self.crp_resample_aux_transition_counts()
+
+        elif resample_type == "gem":
+
+            self.gem_resample_aux_transition_counts()            
+
+
+
+    def _get_beta_mixture_variables_metaparameters(self):
 
         """
         Calculate parameters for the Dirichlet posterior of the transition beta
@@ -750,15 +978,24 @@ class HDPHMM(object):
         """
 
         # beta ~ Dir(m_.1, m_.2, ... , m_.K, gamma)
-        dir_posterior_params_betas = {s2: sum(self.auxiliary_transition_variables[s1][s2] for s1 in self.states)
-            for s2 in self.states}
+        if self.resample_type not "gem":
+
+            dir_posterior_params_beta_mixture_variables = {s2: sum(self.auxiliary_transition_variables[s1][s2] for s1 in self.states)
+                for s2 in self.states}
+
+        else:
+
+            # if we use gem resampling method, we just take the length (i.e. number of partitions)
+            # of the dish_sticks dictionaries 
+            dir_posterior_params_beta_mixture_variables = {s1: len(list(self.dish_sticks[s1].keys()))-1 for s1 in self.states}
+            
         
         # posterior param for None is always gamma per stick-breaking process 
-        dir_posterior_params_betas[None] = self.hyperparameters["gamma"]
+        dir_posterior_params_beta_mixture_variables[None] = self.hyperparameters["gamma"]
 
-        return dir_posterior_params_betas
+        return dir_posterior_params_beta_mixture_variables
 
-    def resample_beta_transition(self, ncores=1, auxiliary_resample_type="mh", use_approximation=True, eps=1e-12):
+    def resample_beta_mixture_variables(self, ncores=1, auxiliary_resample_type="mh", use_approximation=True, eps=1e-12):
         
         """
         Resample the beta values used to calculate the starting and transition
@@ -778,23 +1015,23 @@ class HDPHMM(object):
                                                       resample_type=auxiliary_resample_type,
                                                       use_approximation=use_approximation)
 
-        # get dir posterior params for betas now that we've resampled m_jk's
-        dir_posterior_params_betas = self._get_beta_transition_metaparameters()
-        # resample from Dirichlet posterior and overwrite beta_transition class variable with new sample
-        beta_transition = dict(zip(list(dir_posterior_params_betas.keys()), 
-            np.random.dirichlet(list(dir_posterior_params_betas.values())).tolist()))
-        self.beta_transition = shrink_probabilities(beta_transition, eps)
+        # get dir posterior params for beta_mixture_variables now that we've resampled m_jk's
+        dir_posterior_params_beta_mixture_variables = self._get_beta_mixture_variables_metaparameters()
+        # resample from Dirichlet posterior and overwrite beta_mixture_variables class variable with new sample
+        beta_mixture_variables = dict(zip(list(dir_posterior_params_beta_mixture_variables.keys()), 
+            np.random.dirichlet(list(dir_posterior_params_beta_mixture_variables.values())).tolist()))
+        self.beta_mixture_variables = shrink_probabilities(beta_mixture_variables, eps)
 
-    def calculate_beta_transition_loglikelihood(self):
+    def calculate_beta_mixture_variables_loglikelihood(self):
         
-        # get dir posterior params for betas
-        dir_posterior_params_betas = self._get_beta_transition_metaparameters()
-        # first argument is the quantiles of new beta_transition sample and 
+        # get dir posterior params for beta_mixture_variables
+        dir_posterior_params_beta_mixture_variables = self._get_beta_mixture_variables_metaparameters()
+        # first argument is the quantiles of new beta_mixture_variables sample and 
         # second argument is Dirichlet posterior params
-        new_betas_prob_density = np.log(stats.dirichlet.pdf([self.beta_transition[s] for s in beta_posterior_params.keys()],
-                [dir_posterior_params_betas[s] for s in beta_posterior_params.keys()]))
+        new_beta_mixture_variables_prob_density = np.log(stats.dirichlet.pdf([self.beta_mixture_variables[s] for s in beta_posterior_params.keys()],
+                [dir_posterior_params_beta_mixture_variables[s] for s in beta_posterior_params.keys()]))
 
-        return new_betas_prob_density
+        return new_beta_mixture_variables_prob_density
 
 
     def _get_p_initial_metaparameters(self):
@@ -810,8 +1047,8 @@ class HDPHMM(object):
         # counts n_initial for each state plus the product of the corresponding beta value for 
         # the state and the alpha parameter
         dir_posterior_params_initial = {s: self.n_initial[s]
-            + (self.hyperparameters["alpha"] * self.beta_transition[s]) for s in self.states}
-        dir_posterior_params_initial[None] = (self.hyperparameters["alpha"] * self.beta_transition[None])
+            + (self.hyperparameters["alpha"] * self.beta_mixture_variables[s]) for s in self.states}
+        dir_posterior_params_initial[None] = (self.hyperparameters["alpha"] * self.beta_mixture_variables[None])
         
         return dir_posterior_params_initial
 
@@ -848,12 +1085,12 @@ class HDPHMM(object):
             # and ordered dish s2, meaning we transitioned from 
             # state to s2
             dir_posterior_params_pi_k = {s2: self.n_transition[state][s2]
-                + (self.hyperparameters["alpha"] * (1 - self.hyperparameters["kappa"]) * self.beta_transition[s2])
+                + (self.hyperparameters["alpha"] * (1 - self.hyperparameters["kappa"]) * self.beta_mixture_variables[s2])
                 for s2 in self.states}
 
             dir_posterior_params_pi_k[None] = (self.hyperparameters["alpha"]
                 * (1 - self.hyperparameters["kappa"])
-                * self.beta_transition[None])
+                * self.beta_mixture_variables[None])
 
             # adding kappa back into the self transition; this seems like an odd way to do this 
             dir_posterior_params_pi_k[state] += (self.hyperparameters["alpha"] * self.hyperparameters["kappa"])
@@ -861,10 +1098,10 @@ class HDPHMM(object):
         else:
             
             dir_posterior_params_pi_k = {s2: self.n_transition[state][s2]
-                + self.hyperparameters["alpha"] * self.beta_transition[s2]
+                + self.hyperparameters["alpha"] * self.beta_mixture_variables[s2]
                 for s2 in self.states}
 
-            dir_posterior_params_pi_k[None] = self.hyperparameters["alpha"] * self.beta_transition[None]
+            dir_posterior_params_pi_k[None] = self.hyperparameters["alpha"] * self.beta_mixture_variables[None]
 
         return dir_posterior_params_pi_k
 
@@ -888,9 +1125,9 @@ class HDPHMM(object):
                 np.random.dirichlet(list(dir_posterior_params_pi_k.values())).tolist()))
             self.p_transition[state] = shrink_probabilities(p_transition_state, eps)
 
-        # add transition probabilities from unseen states using betas a dir posterior params
+        # add transition probabilities from unseen states using beta_mixture_variables a dir posterior params
         # note: no stickiness update because these are aggregated states
-        params = {k: self.hyperparameters["alpha"] * v for k, v in self.beta_transition.items()}
+        params = {k: self.hyperparameters["alpha"] * v for k, v in self.beta_mixture_variables.items()}
         p_transition_none = dict(zip(list(params.keys()), 
             np.random.dirichlet(list(params.values())).tolist()))
         self.p_transition[None] = shrink_probabilities(p_transition_none, eps)
@@ -918,7 +1155,7 @@ class HDPHMM(object):
                     [dir_posterior_params_pi_k[s] for s in states]))
 
         # get probability for aggregate, None state
-        params = {k: self.hyperparameters["alpha"] * v for k, v in self.beta_transition.items()}
+        params = {k: self.hyperparameters["alpha"] * v for k, v in self.beta_mixture_variables.items()}
         new_trans_prob_density += np.log(stats.dirichlet.pdf([self.p_transition[None][s] for s in states], 
             [params[s] for s in states]))
 
@@ -1146,7 +1383,7 @@ class HDPHMM(object):
         :return: non-negative float
         """
 
-        return (self.calculate_beta_transition_loglikelihood()
+        return (self.calculate_beta_mixture_variables_loglikelihood()
             + self.calculate_beta_emission_loglikelihood()
             + self.calculate_p_initial_loglikelihood()
             + self.calculate_p_transition_loglikelihood()
@@ -1286,28 +1523,30 @@ class HDPHMM(object):
         		"chain_loglikelihood": list(),
         		"hyperparameters": list(),
         		"beta_emission": list(),
-        		"beta_transition": list(),
+        		"beta_mixture_variables": list(),
         		"parameters": list()}
 
         # cycle through iterations
         for i in tqdm.tqdm(range(n_iter)):
 
-        	# remove unused latent states from previous iteration 
-        	self.remove_unused_states()
-
-        	"""
+            """
             work down hierarchy when resampling
             """
 
-    		# resample priors alpha, gamma, kappa, emission priors
-            self.resample_hyperparameters() # Metropolis?
-
-            self.resample_beta_transition(ncores=ncores)
-            self.resample_beta_emission()
+            # resample latent states z_t via beam sampling
+        	self.resample_chains(ncores=ncores)
+            # remove unused latent states from previous iteration 
+        	self.remove_unused_states()
+            # resample beta_mixture_variables
+            self.resample_beta_mixture_variables(ncores=ncores)
+            # resample transition variables
             self.resample_p_initial()
             self.resample_p_transition()
+            # resample emissions parameters
+            self.resample_beta_emission()
             self.resample_p_emission()
-            self.resample_chains(ncores=ncores) # reconsider this order given fox thesis
+            # resample priors alpha, gamma, kappa, emission priors
+            self.resample_hyperparameters() # MH or Gibbs?
 
             # update computation-heavy statistics
             likelihood_curr = self.calculate_loglikelihood()
@@ -1349,7 +1588,7 @@ class HDPHMM(object):
 
                 results["hyperparameters"].append(copy.deepcopy(self.hyperparameters))
                 results["beta_emission"].append(self.beta_emission)
-                results["beta_transition"].append(self.beta_transition)
+                results["beta_mixture_variables"].append(self.beta_mixture_variables)
                 results["parameters"].append({"p_initial": p_initial,
                 							"p_emission": p_emission,
                         					"p_transition": p_transition})

@@ -174,7 +174,7 @@ class Chain(object):
         if seqlen == 0:
             return []
 
-        # list of initial and transition probabilities for current latent sequence
+        # list of initial and transition probabilities using current latent sequence
         temp_p_transition = [p_initial[latent_sequence[0]]] + [p_transition[latent_sequence[t]][latent_sequence[t + 1]] 
         for t in range(seqlen - 1)]
 
@@ -186,6 +186,8 @@ class Chain(object):
         p_history = [dict()] * seqlen
         latent_sequence = [str()] * seqlen
 
+        ### RETURN TO THIS ###: Note that Fox (2009) starts with a backward recursion
+        ### FORWARD RECURSION ###
         # compute probability emissions at t=0 overall possible states if the init state probs
         # are greater than the aux_var u probabilities
         p_history[0] = {s: p_initial[s] * p_emission[s][emission_sequence[0]] if p_initial[s] > auxiliary_vars[0] else 0 for s in states}
@@ -194,8 +196,10 @@ class Chain(object):
         for t in range(1, seqlen):
             
             # p_temp for s2 = sum(p(s1)) for all states s1 * p(o_t2|s2) for all states s2 where p(s2|s1) > u_t2
-            # Note: We're using the actual emissions fro the chain for t2
-            p_temp = {s2: sum(p_history[t - 1][s1] for s1 in states if p_transition[s1][s2] > auxiliary_vars[t])
+            # Note: We're using the actual emissions from the chain for t2
+            # Note: No need for an 'else 0' since we just don't include instances where transition is less than aux to the sum
+            ### RETURN TO THIS ### need to multiply previous state prob by transition prob
+            p_temp = {s2: sum(p_history[t - 1][s1] * p_transition[s1][s2] for s1 in states if p_transition[s1][s2] > auxiliary_vars[t])
             * p_emission[s2][emission_sequence[t]] for s2 in states}
             
             # we then marginlalize the resulting p_temp and p_temp becomes p_history for that timestep
@@ -204,14 +208,14 @@ class Chain(object):
 
         # choose ending state based on probability weights
         latent_sequence[seqlen - 1] = random.choices(tuple(p_history[seqlen - 1].keys()),
-                                        weights=tuple(p_history[seqlen - 1].values()),
-                                        k=1)[0]
+                                        weights=tuple(p_history[seqlen - 1].values()), k=1)[0]
 
+        ### BACKWARD RECURSION ###
         # work backwards to compute new latent sequence starting at the penultimate timestamp
         for t in range(seqlen - 2, -1, -1):
             
-            # p_temp for s1 = P(s1) * p(s2_actual|s1) if p(s2_actual|s1) > u_t2 for all states 1
-            # Note: We're using the actual latent states from the chain for s2 to update p(s1)
+            # p_temp for s1 = p(s1) * p(s2_actual|s1) if p(s2_actual|s1) > u_t2 for all states 1
+            # Note: We're using the actual latent states (after resampling) from the chain for s2 to update p(s1)
             p_temp = {s1: p_history[t][s1] * p_transition[s1][latent_sequence[t + 1]]
                 if p_transition[s1][latent_sequence[t + 1]] > auxiliary_vars[t + 1] else 0 for s1 in states}
             
