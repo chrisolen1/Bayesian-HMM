@@ -20,6 +20,7 @@ from typing import (Collection,
 
 import numpy as np
 import random
+import scipy
 import copy
 
 # shorthand for numeric types
@@ -151,10 +152,12 @@ class Chain(object):
                                 states: Set[str],
                                 p_initial: InitDict,
                                 p_emission: NestedInitDict,
-                                p_transition: NestedInitDict) -> List[str]:
+                                p_transition: NestedInitDict,
+                                state_distributions) -> List[str]:
         
         """
-        Resample the latent sequence of a chain. This is usually called by another
+        Resample the latent sequence of a chain using the forward-backward algorith. 
+        # This is usually called by another
         method or class, rather than directly. It is included to allow for
         multithreading in the resampling step.
         :param sequences: tuple(list, list), an emission sequence and latent beam
@@ -186,41 +189,125 @@ class Chain(object):
         p_history = [dict()] * seqlen
         latent_sequence = [str()] * seqlen
 
-        ### RETURN TO THIS ###: Note that Fox (2009) starts with a backward recursion
-        ### FORWARD RECURSION ###
-        # compute probability emissions at t=0 overall possible states if the init state probs
-        # are greater than the aux_var u probabilities
-        p_history[0] = {s: p_initial[s] * p_emission[s][emission_sequence[0]] if p_initial[s] > auxiliary_vars[0] else 0 for s in states}
+        if state_distributions == "dirichlet_process":
 
-        # for remaining states, probabilities are function of emission and transition
-        for t in range(1, seqlen):
-            
-            # p_temp for s2 = sum(p(s1)) for all states s1 * p(o_t2|s2) for all states s2 where p(s2|s1) > u_t2
-            # Note: We're using the actual emissions from the chain for t2
-            # Note: No need for an 'else 0' since we just don't include instances where transition is less than aux to the sum
-            ### RETURN TO THIS ### need to multiply previous state prob by transition prob
-            p_temp = {s2: sum(p_history[t - 1][s1] * p_transition[s1][s2] for s1 in states if p_transition[s1][s2] > auxiliary_vars[t])
-            * p_emission[s2][emission_sequence[t]] for s2 in states}
-            
-            # we then marginlalize the resulting p_temp and p_temp becomes p_history for that timestep
-            p_temp_total = sum(p_temp.values())
-            p_history[t] = {s: p_temp[s] / p_temp_total for s in states}
+            ### FORWARD RECURSION ###
+            # compute probability emissions at t=0 overall possible states if the init state probs
+            # are greater than the aux_var u probabilities
+            p_history[0] = {s: p_initial[s] * p_emission[s][emission_sequence[0]] if p_initial[s] > auxiliary_vars[0] else 0 for s in states}
 
-        # choose ending state based on probability weights
-        latent_sequence[seqlen - 1] = random.choices(tuple(p_history[seqlen - 1].keys()),
+            ### FORWARD RECURSION ###
+            # for remaining states, probabilities are function of emission and transition
+            for t in range(1, seqlen):
+            
+                # p_temp for s2 = sum(p(s1)) for all states s1 * p(o_t2|s2) for all states s2 where p(s2|s1) > u_t2
+                # Note: We're using the actual emissions from the chain for t2
+                # Note: No need for an 'else 0' since we just don't include instances where transition is less than aux to the sum
+                ### RETURN TO THIS ### need to multiply previous state prob by transition prob
+                p_temp = {s2: sum(p_history[t - 1][s1] * p_transition[s1][s2] for s1 in states if p_transition[s1][s2] > auxiliary_vars[t])
+                * p_emission[s2][emission_sequence[t]] for s2 in states}
+            
+                # we then marginlalize the resulting p_temp and p_temp becomes p_history for that timestep
+                p_temp_total = sum(p_temp.values())
+                p_history[t] = {s: p_temp[s] / p_temp_total for s in states}
+
+            # choose ending state based on probability weights
+            latent_sequence[seqlen - 1] = random.choices(tuple(p_history[seqlen - 1].keys()),
                                         weights=tuple(p_history[seqlen - 1].values()), k=1)[0]
 
-        ### BACKWARD RECURSION ###
-        # work backwards to compute new latent sequence starting at the penultimate timestamp
-        for t in range(seqlen - 2, -1, -1):
+            ### BACKWARD RECURSION ###
+            # work backwards to compute new latent sequence starting at the penultimate timestamp
+            for t in range(seqlen - 2, -1, -1):
             
-            # p_temp for s1 = p(s1) * p(s2_actual|s1) if p(s2_actual|s1) > u_t2 for all states 1
-            # Note: We're using the actual latent states (after resampling) from the chain for s2 to update p(s1)
-            p_temp = {s1: p_history[t][s1] * p_transition[s1][latent_sequence[t + 1]]
-                if p_transition[s1][latent_sequence[t + 1]] > auxiliary_vars[t + 1] else 0 for s1 in states}
+                # p_temp for s1 = p(s1) * p(s2_actual|s1) if p(s2_actual|s1) > u_t2 for all states 1
+                # Note: We're using the actual latent states (after resampling) from the chain for s2 to update p(s1)
+                p_temp = {s1: p_history[t][s1] * p_transition[s1][latent_sequence[t + 1]]
+                    if p_transition[s1][latent_sequence[t + 1]] > auxiliary_vars[t + 1] else 0 for s1 in states}
             
-            # choose new latent state for current timestep based on p(s1) for all s1
-            latent_sequence[t] = random.choices(tuple(p_temp.keys()), weights=tuple(p_temp.values()), k=1)[0]
+                # choose new latent state for current timestep based on p(s1) for all s1
+                latent_sequence[t] = random.choices(tuple(p_temp.keys()), weights=tuple(p_temp.values()), k=1)[0]
 
-        # latent sequence now completely filled
-        return latent_sequence
+            # latent sequence now completely filled
+            return latent_sequence
+
+        elif state_distributions == "gaussian":
+
+            import scipy.stats.norm as norm
+            ### FORWARD RECURSION ###
+            # compute probability emissions at t=0 overall possible states if the init state probs
+            # are greater than the aux_var u probabilities
+            p_history[0] = {s: p_initial[s] * norm.pdf(emission_sequence[0], p_emission[s]['location'], p_emission[s]['scale']) \
+                if p_initial[s] > auxiliary_vars[0] else 0 for s in states}
+
+            ### FORWARD RECURSION ###
+            # for remaining states, probabilities are function of emission and transition
+            for t in range(1, seqlen):
+            
+                # p_temp for s2 = sum(p(s1)) for all states s1 * p(o_t2|s2) for all states s2 where p(s2|s1) > u_t2
+                # Note: We're using the actual emissions from the chain for t2
+                # Note: No need for an 'else 0' since we just don't include instances where transition is less than aux to the sum
+                ### RETURN TO THIS ### need to multiply previous state prob by transition prob
+                p_temp = {s2: sum(p_history[t - 1][s1] * p_transition[s1][s2] for s1 in states if p_transition[s1][s2] > auxiliary_vars[t])
+                * norm.pdf(emission_sequence[t], p_emission[s2]['location'], p_emission[s2]['scale']) for s2 in states}
+
+                # we then marginlalize the resulting p_temp and p_temp becomes p_history for that timestep
+                p_temp_total = sum(p_temp.values())
+                p_history[t] = {s: p_temp[s] / p_temp_total for s in states}
+
+            # choose ending state based on probability weights
+            latent_sequence[seqlen - 1] = random.choices(tuple(p_history[seqlen - 1].keys()),
+                                        weights=tuple(p_history[seqlen - 1].values()), k=1)[0]
+
+            ### BACKWARD RECURSION ###
+            # work backwards to compute new latent sequence starting at the penultimate timestamp
+            for t in range(seqlen - 2, -1, -1):
+            
+                # p_temp for s1 = p(s1) * p(s2_actual|s1) if p(s2_actual|s1) > u_t2 for all states 1
+                # Note: We're using the actual latent states (after resampling) from the chain for s2 to update p(s1)
+                p_temp = {s1: p_history[t][s1] * p_transition[s1][latent_sequence[t + 1]]
+                    if p_transition[s1][latent_sequence[t + 1]] > auxiliary_vars[t + 1] else 0 for s1 in states}
+            
+                # choose new latent state for current timestep based on p(s1) for all s1
+                latent_sequence[t] = random.choices(tuple(p_temp.keys()), weights=tuple(p_temp.values()), k=1)[0]
+
+            # latent sequence now completely filled
+            return latent_sequence
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

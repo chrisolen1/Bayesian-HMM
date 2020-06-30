@@ -33,6 +33,8 @@ import functools
 import multiprocessing
 import string
 from scipy import special, stats
+import scipy.stats.invwishart as invwishart
+import scipy.stats.norm as norm
 from sympy.functions.combinatorial.numbers import stirling
 from .chain import Chain
 from .utils import label_generator, dirichlet_process_generator, shrink_probabilities
@@ -119,20 +121,30 @@ class HDPHMM(object):
 
         self.state_distributions = state_distributions
 
-        # store hyperparameter priors
-        # may want to use maximum likelihood value to inform 
-        # theta and sigma priors 
-        self.priors = {"alpha": lambda: np.random.gamma(2, 2),
-        "gamma": lambda: np.random.gamma(3, 3),
-        "alpha_emission": lambda: np.random.gamma(2, 2),
-        "gamma_emission": lambda: np.random.gamma(3, 3),
-        "theta_emission": lambda: np.random.normal(0, 5),
-        "sigma_emission": lambda: np.random.gamma(1, 5),
-        "kappa": lambda: np.random.beta(1, 1)}
-
         ### RETURN TO THIS ###
         if priors is not None:
             self.priors.update(priors)
+
+        # store hyperparameter priors lambda functions
+        if self.state_distributions == 'dirichlet_process':
+
+            self.priors = {"alpha": lambda: np.random.gamma(2, 2),
+                "gamma": lambda: np.random.gamma(3, 3),
+                "alpha_emission": lambda: np.random.gamma(2, 2),
+                "gamma_emission": lambda: np.random.gamma(3, 3),
+                "kappa": lambda: np.random.beta(1, 1)}
+
+        elif self.state_distributions == 'gaussian':
+
+            # may want to use maximum likelihood value to inform 
+            # theta and sigma priors 
+            self.priors = {"alpha": lambda: np.random.gamma(2, 2),
+                "gamma": lambda: np.random.gamma(3, 3),
+                "gamma_emission": lambda: np.random.gamma(3, 3),
+                "kappa": lambda: np.random.beta(1, 1)}
+
+            self.state_priors = {"theta_emission": lambda: np.random.normal(0, 5),
+                "sigma_emission": lambda: np.random.gamma(1, 5)}
 
         if len(self.priors) > 5:
             raise ValueError("Unknown hyperparameter priors present")
@@ -144,7 +156,7 @@ class HDPHMM(object):
             if priors is not None and "kappa" in priors:
                 raise ValueError("`sticky` is False, but kappa prior function given")
 
-        # store param_name: param_value in hyperparams dict
+        # make initial draw from priors
         self.hyperparameters = {param: prior() for param, prior in self.priors.items()}
 
         # use internal properties to store counts, initialize to zero
@@ -179,7 +191,6 @@ class HDPHMM(object):
         ### RETURN TO THIS ###
         self.beta_emission: InitDict
         self.beta_emission = {None: 1}
-        
 
         ### RETURN TO THIS ###
         # states & emissions
@@ -309,7 +320,11 @@ class HDPHMM(object):
                 
                 self.n_transition[s].update({label: 0})
             ### the number of emissions belong to the new state = 0
-            self.n_emission[label] = {e: 0 for e in self.emissions}
+            if self.state_distributions == "dirichlet_process":
+                self.n_emission[label] = {e: 0 for e in self.emissions}
+            # we don't care about per-state emissions counts in this case 
+            elif self.state_distributions == "gaussian":
+                pass
             
 
             """
@@ -387,7 +402,13 @@ class HDPHMM(object):
 
             elif self.state_distributions == "gaussian":
 
+                # make a draw for the prior mean of each state distribution 
+                self.p_emission = {state: {"location": self.state_priors["theta_emission"]()} for state in self.states}
 
+                # make a draw for the prior variance of each state distribution 
+                for state in self.states:
+
+                    self.p_emissions[state]["scale"] = self.state_priors["sigma_emission"]()
 
             # save generated label to state dict
             self.states = self.states.union({label})
@@ -489,9 +510,16 @@ class HDPHMM(object):
         
         # set n_initial, n_emission, and n_transition objects (NOT their corresponding class objects) to 0 for each state 
         n_initial = {s: 0 for s in self.states.union({None})}
-        n_emission = {s: {e: 0 for e in self.emissions} for s in self.states.union({None})}
         n_transition = {s1: {s2: 0 for s2 in self.states.union({None})} for s1 in self.states.union({None})}
+        if self.state_distributions == "dirichlet_process":
+            # sum number of instances of each emission per state if we use dirichlet process prior for state distribution 
+            n_emission = {s: {e: 0 for e in self.emissions} for s in self.states.union({None})}
+        elif self.state_distributions == "gaussian":
+            # sum number of instances of each emission overall if we use gaussian prior for state distributions 
+            # since we're only concerned with the overall frequency of each emission 
+            n_emissions = {e: 0 for e in self.emissions}
 
+        
         # increment all relevant hyperparameters while looping over sequence/chain
         for chain in self.chains:
             
@@ -499,13 +527,19 @@ class HDPHMM(object):
             n_initial[chain.latent_sequence[0]] += 1
 
             # increment n_emissions only for final state--emission pair
-            n_emission[chain.latent_sequence[chain.T - 1]][chain.emission_sequence[chain.T - 1]] += 1
+            if self.state_distributions == "dirichlet_process":
+                n_emission[chain.latent_sequence[chain.T - 1]][chain.emission_sequence[chain.T - 1]] += 1
+            elif self.state_distributions == "gaussian":
+                n_emission[chain.emission_sequence[chain.T - 1]] += 1
 
             # increment all n_transitions and n_emissions within chain
             for t in range(chain.T - 1):
                 
                 # within chain emissions
-                n_emission[chain.latent_sequence[t]][chain.emission_sequence[t]] += 1
+                if self.state_distributions == "dirichlet_process":
+                    n_emission[chain.latent_sequence[t]][chain.emission_sequence[t]] += 1
+                elif self.state_distributions == "gaussian":
+                    n_emission[chain.emission_sequence[t]] += 1
                 # within chain transitions
                 n_transition[chain.latent_sequence[t]][chain.latent_sequence[t + 1]] += 1
 
@@ -1233,6 +1267,8 @@ class HDPHMM(object):
         
         return dir_posterior_params_emissions_per_state
 
+        # Note: I believe just applies to dirichlet process 
+
     def resample_p_emission(self, eps=1e-12):
         
         """
@@ -1241,18 +1277,28 @@ class HDPHMM(object):
         :return: None
         """
 
-        # for each state, sample from the dirichlet posterior params corresonding to 
-        # the emissions probabilities given that state
-        for state in self.states:
-            dir_posterior_params_emissions_per_state = self._get_p_emission_metaparameters(state)
-            p_emission_state = dict(zip(list(dir_posterior_params_emissions_per_state.keys()), 
-                np.random.dirichlet(list(dir_posterior_params_emissions_per_state.values())).tolist()))
-            self.p_emission[state] = shrink_probabilities(p_emission_state, eps)
+        if self.state_distributions == "dirichlet_process":
+        
+            # for each state, sample from the dirichlet posterior params corresonding to 
+            # the emissions probabilities given that state
+            for state in self.states:
+                dir_posterior_params_emissions_per_state = self._get_p_emission_metaparameters(state)
+                p_emission_state = dict(zip(list(dir_posterior_params_emissions_per_state.keys()), 
+                    np.random.dirichlet(list(dir_posterior_params_emissions_per_state.values())).tolist()))
+                self.p_emission[state] = shrink_probabilities(p_emission_state, eps)
 
-        # add emission probabilities from unseen states
-        params = {k: self.hyperparameters["alpha_emission"] * v for k, v in self.beta_emission.items()}
-        p_emission_none = dict(zip(list(params.keys()), np.random.dirichlet(list(params.values())).tolist()))
-        self.p_emission[None] = shrink_probabilities(p_emission_none, eps)
+            # add emission probabilities from unseen states based on the overall occurence
+            # of each emission (i.e. beta_emission)
+            params = {k: self.hyperparameters["alpha_emission"] * v for k, v in self.beta_emission.items()}
+            p_emission_none = dict(zip(list(params.keys()), np.random.dirichlet(list(params.values())).tolist()))
+            self.p_emission[None] = shrink_probabilities(p_emission_none, eps)
+
+        elif self.state_distributions == "gaussian":
+
+
+
+
+
 
     def calculate_p_emission_loglikelihood(self):
         
@@ -1269,8 +1315,7 @@ class HDPHMM(object):
 
         # get probability for aggregate state
         params = {k: self.hyperparameters["alpha_emission"] * v for k, v in self.beta_emission.items()}
-        new_emission_per_state_prob_density += np.log(
-            stats.dirichlet.pdf([self.p_emission[None][e] for e in self.emissions],
+        new_emission_per_state_prob_density += np.log(stats.dirichlet.pdf([self.p_emission[None][e] for e in self.emissions],
                 [params[e] for e in self.emissions]))
 
         return new_emission_per_state_prob_density
@@ -1423,7 +1468,8 @@ class HDPHMM(object):
         									states=list(self.states) + [None],
             								p_initial=copy.deepcopy(p_initial),
             								p_emission=copy.deepcopy(p_emission),
-            								p_transition=copy.deepcopy(p_transition))
+            								p_transition=copy.deepcopy(p_transition),
+                                            state_distributions=self.state_distributions)
 
         # parallel process beam resampling of latent states 
         ### RETURN TO THIS: each chain gets its separate process?###
