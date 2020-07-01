@@ -12,6 +12,10 @@ import random
 import itertools
 import string
 
+from scipy.stats import norm as normal
+from scipy.stats import gamma
+
+
 # Shorthand for a numeric type.
 Numeric = Union[int, float]
 
@@ -88,5 +92,34 @@ def max_dict(d: Dict[str, Numeric], eps: Numeric = 1e-8) -> Dict[str, Numeric]:
 def shrink_probabilities(d: Dict[Optional[str], Numeric], eps: Numeric = 1e-12) -> Dict[Optional[str], Numeric]:
 
     denom = sum(d.values()) + len(d) * eps
-    
+
     return {k: (float(v) + eps) / denom for k, v in d.items()}
+
+def normal_gamma_rvs(mu, _lambda, alpha, beta, size=1, random_state=None):
+
+    """
+    Draw from a normal-gamma distribution prior for conjugate gaussian likelihood distribution
+    when both mu and sigma are uncertain. 
+    The gamma distribution is the prior
+    for the precision parameter (i.e. 1/variance or scale) of the normal distribution 
+    :params mu: location parameter for normal distribution 
+    :params _lambda: sample size parameter for estimating mu
+    :params alpha: shape parameter for gamma distribution 
+    :params beta: rate (i.e. 1/scale) parameter for gamma distribution
+    :size: size of the sample
+    :return: new location and scale (variance) params top
+    """
+
+    # draw precision, tau from gamma distribution 
+    tau = gamma.rvs(alpha, scale=1/beta, size=size, random_state=random_state)
+
+    mu_new = normal.rvs(loc=mu, scale=1/(_lambda*tau), size=size, random_state=random_state)
+
+    return [(mu_new[i], 1/tau[i]) for i in range(size)]
+
+
+
+
+
+
+
