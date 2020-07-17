@@ -22,6 +22,8 @@ import numpy as np
 import random
 import scipy
 import copy
+from scipy.stats import norm as norm
+from scipy.stats import multinomial as multinomial
 
 # shorthand for numeric types
 Numeric = Union[int, float]
@@ -116,10 +118,15 @@ class Chain(object):
         # update _initialised_flag to True
         self._initialised_flag = True
 
-    def neglogp_chain(self,
+    def calculate_chain_loglikelihood(self,
                       p_initial: InitDict,
                       p_emission: NestedInitDict,
-                      p_transition: NestedInitDict,) -> Numeric:
+                      p_transition: NestedInitDict,
+                      n_initial: InitDict,
+                      n_transition: NestedInitDict,
+                      state_distribution,
+                      chains,
+                      states) -> Numeric:
         
         """
         Negative log likelihood of the chain, using the given parameters.
@@ -135,17 +142,74 @@ class Chain(object):
             return 0
 
         # np.prod([])==1, so this is safe
+
+        # pull out the number of separate chains 
+        n_chains = len(chains)
         
-        # add log prob of initial state and log prob of emission given state for first emission
-        p_start = np.log(p_initial[self.latent_sequence[0]]) + np.log(p_emission[self.latent_sequence[0]][self.emission_sequence[0]])
+       
 
-        # for each subsequent timestep, add emission probability given state and transition probability from prev timestep to current
-        p_remainder = [np.log(p_emission[self.latent_sequence[t]][self.emission_sequence[t]])
-            + np.log(p_transition[self.latent_sequence[t - 1]][self.latent_sequence[t]])
-            for t in range(1, self.T)]
+        if state_distribution == 'dirichlet':
 
-        # sum up the two objects and negate
-        return -(p_start + sum(p_remainder))
+            """
+            to calculate likelihood if state_distribution == 'dirichlet'
+            (i.e. p(Data|θ)), then we:
+            1. calculate the log multionmial density of the n_initials given the parameters of the
+            multinomial distribution p_initial drawn from the dirichlet prior;
+            2. calculate the log multinomial density of the n_transitions for each state given the 
+            parameters of the multinomial distributions p_transition for each state drawn from the dirichlet
+            prior;
+            3. calculate the log multinomial density of the n_emissions for each state given the 
+            parameters of the multinomial distributions n_emissions for each state drawn from the dirichlet 
+            prior, and;
+            4 add the log densities together
+            """
+
+            start_likelihood = np.log(multinomial.pmf(list(n_initial[state].values()), 
+                            n=n_chains, 
+                            p=list(p_transition[state].values())))
+
+            transition_likelihood = sum(np.log(multinomial.pmf(list(n_transition[state].values()), 
+                            n=sum(list(n_transition[state].values())), 
+                            p=list(p_transition[state].values()))) for state in states)
+
+            emission_likelihood = sum(np.log(multinomial.pmf(list(n_emission[state].values()), 
+                            n=sum(list(n_emission[state].values())), 
+                            p=list(p_emission[state].values()))) for state in states)
+
+            return start_likelihood + transition_likelihood + emission_likelihood
+
+        elif state_distribution == 'univariate_gaussian':
+
+            """
+            to calculate likelihood if state_distribution == 'dirichlet'
+            (i.e. p(Data|θ)), then we:
+            1. calculate the log multionmial density of the n_initials given the parameters of the
+            multinomial distribution p_initial drawn from the dirichlet prior;
+            2. calculate the log multinomial density of the n_transitions for each state given the 
+            parameters of the multinomial distributions p_transition for each state drawn from the dirichlet
+            prior;
+            3. for each emission in each chain, calculate the log gaussian density of the emission given the
+            parameters of its respective state's gaussian distribution 
+            4 add the log densities together
+            """
+
+            start_likelihood = np.log(multinomial.pmf(list(n_initial[state].values()), 
+                            n=n_chains, 
+                            p=list(p_transition[state].values())))
+
+            transition_likelihood = sum(np.log(multinomial.pmf(list(n_transition[state].values()), 
+                            n=sum(list(n_transition[state].values())), 
+                            p=list(p_transition[state].values()))) for state in states)
+
+            
+
+            emission_likelihood = sum([sum([np.log(norm.pdf(chains[i].emission_sequence[j],
+                p_emission[chains[i].latent_sequence[j]]['location'], p_emission[s]['scale']) \
+                    for j in range(len(chains[i].latent_sequence)))]) for i in range(len(n_chains))])
+
+
+            return start_likelihood + transition_likelihood + emission_likelihood
+
 
     @staticmethod
     def resample_latent_sequence(sequences: Tuple[List[str], List[str]],
@@ -153,7 +217,7 @@ class Chain(object):
                                 p_initial: InitDict,
                                 p_emission: NestedInitDict,
                                 p_transition: NestedInitDict,
-                                state_distributions) -> List[str]:
+                                state_distribution) -> List[str]:
         
         """
         Resample the latent sequence of a chain using the forward-backward algorith. 
@@ -189,7 +253,7 @@ class Chain(object):
         p_history = [dict()] * seqlen
         latent_sequence = [str()] * seqlen
 
-        if state_distributions == "dirichlet_process":
+        if state_distribution == "dirichlet_process":
 
             ### FORWARD RECURSION ###
             # compute probability emissions at t=0 overall possible states if the init state probs
@@ -230,9 +294,9 @@ class Chain(object):
             # latent sequence now completely filled
             return latent_sequence
 
-        elif state_distributions == "gaussian":
+        elif state_distribution == "univariate_gaussian":
 
-            import scipy.stats.norm as norm
+            
             ### FORWARD RECURSION ###
             # compute probability emissions at t=0 overall possible states if the init state probs
             # are greater than the aux_var u probabilities

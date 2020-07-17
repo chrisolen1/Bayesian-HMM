@@ -104,18 +104,32 @@ def normal_gamma_rvs(mu, _lambda, alpha, beta, size=1, random_state=None):
     for the precision parameter (i.e. 1/variance or scale) of the normal distribution 
     :params mu: location parameter for normal distribution 
     :params _lambda: sample size parameter for estimating mu
-    :params alpha: shape parameter for gamma distribution 
+    :params alpha: shape parameter for gamma distribution https://en.wikipedia.org/wiki/Normal-gamma_distribution
     :params beta: rate (i.e. 1/scale) parameter for gamma distribution
     :size: size of the sample
     :return: new location and scale (variance) params top
     """
 
     # draw precision, tau from gamma distribution 
-    tau = gamma.rvs(alpha, scale=1/beta, size=size, random_state=random_state)
+    tau = gamma.rvs(loc=alpha, scale=1/beta, size=size, random_state=random_state)
 
     mu_new = normal.rvs(loc=mu, scale=1/(_lambda*tau), size=size, random_state=random_state)
 
     return [(mu_new[i], 1/tau[i]) for i in range(size)]
+
+def normal_gamma_pdf(x_tuple, prior_mu, prior_lambda, prior_alpha, prior_beta):
+
+    sample_mu, sample_sigma = x_tuple
+    sample_tau = 1/sample_sigma
+
+    gamma_density = gamma.pdf(sample_tau, prior_alpha, scale=prior_beta)
+    normal_density = normal.pdf(sample_mu, loc=prior_mu, scale=1/())
+
+    normal_gamma_density = np.log(gamma_density) + np.log(normal_density)
+
+    return normal_gamma_density
+
+
 
 
 
