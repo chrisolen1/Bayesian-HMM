@@ -94,11 +94,11 @@ class HDPHMM(object):
             distributions. Hence, it impacts the likelihood of resampling unseen states
             when estimating beta coefficients. That is, higher values of gamma mean the
             HMM is more likely to explore new states when resampling.
-          + alpha_emission: prior distribution of the alpha parameter for the
+          + phi: prior distribution of the alpha parameter for the
             dirichlet process emission prior distribution. Alpha controls how tightly the conditional
             emission distributions follow their hierarchical prior. Hence, higher values
-            of alpha_emission mean more strength in the hierarchical prior.
-          + gamma_emission: prior distribution of the gamma parameter for the
+            of phi mean more strength in the hierarchical prior.
+          + zeta: prior distribution of the gamma parameter for the
             dirichlet process emission prior distribution. Gamma controls the strength of the
             uninformative prior in the emission distribution. Hence, higher values of
             gamma mean more strength of belief in the prior.
@@ -144,8 +144,8 @@ class HDPHMM(object):
 
             self.priors = {"alpha": lambda: np.random.gamma(2, 2),
                 "gamma": lambda: np.random.gamma(3, 3),
-                "alpha_emission": lambda: np.random.gamma(2, 2),
-                "gamma_emission": lambda: np.random.gamma(3, 3),
+                "phi": lambda: np.random.gamma(2, 2),
+                "zeta": lambda: np.random.gamma(3, 3),
                 "kappa": lambda: np.random.beta(1, 1)}
 
         elif self.state_distribution == "univariate_gaussian":
@@ -161,8 +161,6 @@ class HDPHMM(object):
                 # NG_mu_initial, unsure on the others 
                 self.priors = {"alpha": lambda: np.random.gamma(2, 2),
                     "gamma": lambda: np.random.gamma(3, 3),
-                    "gamma_emission": lambda: np.random.gamma(3, 3),
-                    "kappa": lambda: np.random.beta(1, 1),
                     "NG_mu_initial": 0,
                     "NG_lambda_initial": 1,
                     "NG_alpha_initial": 1, 
@@ -225,8 +223,8 @@ class HDPHMM(object):
         self.beta_mixture_variables: InitDict
         self.beta_mixture_variables = {None: 1}
         ### RETURN TO THIS ###
-        self.beta_emission: InitDict
-        self.beta_emission = {None: 1}
+        self.omega: InitDict
+        self.omega = {None: 1}
 
         ### RETURN TO THIS ###
         # states & emissions
@@ -432,7 +430,7 @@ class HDPHMM(object):
             if self.state_distribution == "dirichlet":
 
                 ### Dirichlet process for creating emissions probabilities for each possible emission for each state 
-                temp_p_emission = np.random.dirichlet([self.hyperparameters["alpha"] * self.beta_emission[e] for e in self.emissions])
+                temp_p_emission = np.random.dirichlet([self.hyperparameters["alpha"] * self.omega[e] for e in self.emissions])
                 ### for the new state, zip resulting emissions probability with the emission itself
                 self.p_emission[label] = dict(zip(self.emissions, temp_p_emission))
 
@@ -499,7 +497,7 @@ class HDPHMM(object):
 
         # resample remaining hyperparameters
         self.resample_beta_mixture_variables()
-        self.resample_beta_emission()
+        self.resample_omega()
         self.resample_p_initial()
         self.resample_p_transition()
         self.resample_p_emission()
@@ -1250,7 +1248,7 @@ class HDPHMM(object):
 
         return p_transition_prior_density
 
-    def _get_beta_emission_posterior_parameters(self):
+    def _get_omega_posterior_parameters(self):
         
         """
         Calculate parameters for the Dirichlet posterior of the emission beta variables,
@@ -1262,11 +1260,11 @@ class HDPHMM(object):
 
         # aggregate counts for each emission weighted by hyperparam
         dir_posterior_params_emissions = {e: sum(self.n_emission[s][e] for s in self.states)
-            + self.hyperparameters["gamma_emission"] / self.n for e in self.emissions}
+            + self.hyperparameters["zeta"] / self.n for e in self.emissions}
 
         return dir_posterior_params_emissions
 
-    def resample_beta_emission(self, eps=1e-12):
+    def resample_omega(self, eps=1e-12):
         
         """
         Resample the beta values used to calculate the emission probabilties.
@@ -1275,22 +1273,22 @@ class HDPHMM(object):
         """
         
         # get dir posterior params for emissions
-        dir_posterior_params_emissions = self._get_beta_emission_posterior_parameters()
-        # resample from Dirichlet posterior and overwrite beta_emission class variable with new sample
-        beta_emission = dict(zip(list(dir_posterior_params_emissions.keys()), 
+        dir_posterior_params_emissions = self._get_omega_posterior_parameters()
+        # resample from Dirichlet posterior and overwrite omega class variable with new sample
+        omega = dict(zip(list(dir_posterior_params_emissions.keys()), 
             np.random.dirichlet(list(dir_posterior_params_emissions.values())).tolist()))
-        self.beta_emission = shrink_probabilities(beta_emission, eps)
+        self.omega = shrink_probabilities(omega, eps)
 
-    def calculate_beta_emission_prior_log_density(self):
+    def calculate_omega_prior_log_density(self):
         
         # get dir posterior params for emissions
-        dir_posterior_params_emissions = self._get_beta_emission_posterior_parameters()
-        # first argument is the quantiles of new beta_emission sample and 
+        dir_posterior_params_emissions = self._get_omega_posterior_parameters()
+        # first argument is the quantiles of new omega sample and 
         # second argument is Dirichlet posterior params
-        new_beta_emissions_prior_density = np.log(stats.dirichlet.pdf([self.beta_emission[e] for e in self.emissions],
+        new_omegas_prior_density = np.log(stats.dirichlet.pdf([self.omega[e] for e in self.emissions],
                 [dir_posterior_params_emissions[e] for e in self.emissions]))
         
-        return new_beta_emissions_prior_density
+        return new_omegas_prior_density
 
     def _get_p_emission_posterior_parameters(self, state, hmm_array=None):
 
@@ -1302,11 +1300,11 @@ class HDPHMM(object):
         values
         """
         
-        # for each state, get the number of emissions weighted by beta_emission and alpha param
+        # for each state, get the number of emissions weighted by omega and alpha param
         if self.state_distribution == "dirichlet":    
 
             dir_posterior_params_emissions_per_state = {e: self.n_emission[state][e] 
-                + self.hyperparameters["alpha_emission"] * self.beta_emission[e]
+                + self.hyperparameters["phi"] * self.omega[e]
                 for e in self.emissions}
         
             return dir_posterior_params_emissions_per_state
@@ -1357,8 +1355,8 @@ class HDPHMM(object):
                 self.p_emission[state] = shrink_probabilities(p_emission_state, eps)
 
             # add emission probabilities from unseen states based on the overall occurence
-            # of each emission (i.e. beta_emission)
-            params = {k: self.hyperparameters["alpha_emission"] * v for k, v in self.beta_emission.items()}
+            # of each emission (i.e. omega)
+            params = {k: self.hyperparameters["phi"] * v for k, v in self.omega.items()}
             p_emission_none = dict(zip(list(params.keys()), np.random.dirichlet(list(params.values())).tolist()))
             self.p_emission[None] = shrink_probabilities(p_emission_none, eps)
 
@@ -1393,7 +1391,7 @@ class HDPHMM(object):
                 	    [dir_posterior_params_emissions_per_state[e] for e in self.emissions]))
 
         	# get probability for aggregate state
-        	params = {k: self.hyperparameters["alpha_emission"] * v for k, v in self.beta_emission.items()}
+        	params = {k: self.hyperparameters["phi"] * v for k, v in self.omega.items()}
         	p_emission_prior_density += np.log(stats.dirichlet.pdf([self.p_emission[None][e] for e in self.emissions],
             	    [params[e] for e in self.emissions]))
 
@@ -1528,7 +1526,7 @@ class HDPHMM(object):
         										self.n_initial, self.n_transition, self.state_distribution,
         										self.chains, self.states)
 
-    def calculate_loglikelihood(self):
+    def calculate_posterior_probability(self):
         
         """
         Negative log-likelihood of the entire HDPHMM object. 
@@ -1541,7 +1539,7 @@ class HDPHMM(object):
         """
 
         return (self.calculate_beta_mixture_variables_prior_log_density()
-            + self.calculate_beta_emission_prior_log_density()
+            + self.calculate_omega_prior_log_density()
             + self.calculate_p_initial_prior_log_density()
             + self.calculate_p_transition_prior_log_density()
             + self.calculate_p_emission_prior_log_density()
@@ -1607,9 +1605,11 @@ class HDPHMM(object):
         
         pass
 
-    def resample_hyperparameters(self):
-        
-        """
+    def metropolis_sampling(self, 
+    						ncores, 
+            				current_posterior_probability):
+
+    	"""
         Resample hyperparameters using a Metropolis Hastings algorithm. Uses a
         straightforward resampling approach, which (for each hyperparameter) samples a
         proposed value according to the prior distribution, and accepts the proposed
@@ -1618,41 +1618,123 @@ class HDPHMM(object):
         :return: None
         """
 
-        # iterate and accept each in order
-        for param_name in self.priors.keys():
-            
-            # skipa kappa if not stick HDPHMM
-            if param_name == "kappa" and not self.sticky:
-                continue
+        # retain current posterior hyperparameters
+        current_params = self.hyperparameters
+        
+        """
+		Work down the hierarchy, noting that at the beginning of this process
+		the chain has new states based on the last iteration of resampling
+        """
+    	# 1. resample priors from proposed posterior hyperparameters
+    	self.hyperparameters = {param: prior() for param, prior in self.priors.items()}
+    	# 2. resample beta_mixture_variables
+        self.resample_beta_mixture_variables(ncores=ncores)
+        # 3. resample transition variables
+        self.resample_p_initial()
+        self.resample_p_transition()
+        # 4. resample emissions parameters
+        if self.state_distribution == "dirichlet":
+        	self.resample_omega()
+        else:
+           	continue
+        self.resample_p_emission()
+        # 5. resample latent states z_t via beam sampling
+        self.resample_chains(ncores=ncores)
+        # 6. remove unused latent states from previous iteration 
+        self.remove_unused_states()
+      
+  		# calculate new posterior probability
+        proposed_posterior_probability = self.calculate_posterior_probability()
 
-            # assign current param to object 
-            param_current = self.hyperparameters[param_name]
-            # get current negative log likelihood
-            posterior_curr = self.calculate_loglikelihood()
+  		# determine whether to accept proposed parameters via metropolis-hastings
+        if proposed_posterior_probability > current_posterior_probability:
 
-            # draw from prior and assign to class variable
-            self.hyperparameters[param_name] = self.priors[param_name]() ###RETURN TO THIS ### do we need to sample all at once?
-            # calculate negative log likelihood given new params
-            posterior_new = self.calculate_loglikelihood()
+        	accepted = True
 
-            # find Metropolis Hasting acceptance probability
-            if posterior_new > posterior_curr:
 
-            	proposed_accepted = True
+        else:
 
-            else:
+        	p_accept = proposed_posterior_probability / current_posterior_probability:
+        	# draw from binom with prop p_accept to determine whether we accept posterior_new
+        	accepted = bool(np.random.binomial(n=1, p=p_accept))
+        	
+        
+        if accepted:
 
-            	p_accept = posterior_new / posterior_curr:
+        	return proposed_posterior_probability
 
-            	# draw from binom with prop p_accept to determine whether we accept posterior_new
-            	alpha_accepted = bool(np.random.binomial(n=1, p=p_accept))
+		else:
 
-            # if we do not accept, revert to the previous value
-            if not alpha_accepted:
+			# reset self.hyperparameters to the previous parameters
+            self.hyperparameters = current_params
+            return current_posterior_probability
 
-                self.hyperparameters[param_name] = param_current
+    def gibbs_sampling(self, 
+    					ncores, 
+    					current_posterior_probability):
 
-    def mcmc(self, n_iter=1000, burn_in=500, save_every=10, ncores=1, verbose=True):
+    	"""
+        Resample hyperparameters using a Metropolis Hastings algorithm. Uses a
+        straightforward resampling approach, which (for each hyperparameter) samples a
+        proposed value according to the prior distribution, and accepts the proposed
+        value with probability scaled by the likelihood of the data given model under
+        the current and proposed models.
+        :return: None
+        """
+
+        # retain current posterior hyperparameters
+        current_params = self.hyperparameters
+
+        
+        for prior in list(self.priors.keys()):
+
+        	# 1. resample priors from proposed posterior hyperparameters
+    		self.hyperparameters[prior] = self.priors[prior]()
+    		# 2. resample beta_mixture_variables
+        	self.resample_beta_mixture_variables(ncores=ncores)
+        	# 3. resample transition variables
+        	self.resample_p_initial()
+        	self.resample_p_transition()
+        	# 4. resample emissions parameters
+        	if self.state_distribution == "dirichlet":
+        		self.resample_omega()
+        	else:
+           		continue
+        	self.resample_p_emission()
+        	# 5. resample latent states z_t via beam sampling
+        	self.resample_chains(ncores=ncores)
+        	# 6. remove unused latent states from previous iteration 
+        	self.remove_unused_states()
+      
+  			# calculate new posterior probability
+  			proposed_posterior_probability = self.calculate_posterior_probability()
+
+  			# determine whether to accept proposed parameters via metropolis-hastings
+        	if proposed_posterior_probability > current_posterior_probability:
+
+        		accepted = True
+
+        	else:
+
+        		p_accept = proposed_posterior_probability / current_posterior_probability:
+        		# draw from binom with prop p_accept to determine whether we accept posterior_new
+        		accepted = bool(np.random.binomial(n=1, p=p_accept))
+        	
+        
+        	if accepted:
+
+        		current_posterior_probability = proposed_posterior_probability
+
+			else:
+
+				# reset self.hyperparameters to the previous parameters
+            	self.hyperparameters[prior] = current_params[prior]
+            	
+        return current_posterior_probability
+
+
+    def mcmc(self, n_iter=1000, burn_in=500, save_every=10, ncores=1, verbose=True, 
+    			sampling_type="metropolis"):
         
         """
         Use Markov Chain Monte Carlo to estimate the starting, transition, and emission
@@ -1680,36 +1762,25 @@ class HDPHMM(object):
         		"loglikelihood": list(),
         		"chain_loglikelihood": list(),
         		"hyperparameters": list(),
-        		"beta_emission": list(),
+        		"omega": list(),
         		"beta_mixture_variables": list(),
         		"parameters": list()}
 
+        # get initial posterior probability calculation 
+        current_posterior_probability = self.calculate_posterior_probability()
+        
         # cycle through iterations
         for i in tqdm.tqdm(range(n_iter)):
 
-            """
-            work down hierarchy when resampling
-            """
+        	if sampling_type == "metropolis":
 
-            # resample priors alpha, gamma, kappa, emission priors
-            self.resample_hyperparameters() # MH or Gibbs?
-            # resample latent states z_t via beam sampling
-        	self.resample_chains(ncores=ncores)
-            # remove unused latent states from previous iteration 
-        	self.remove_unused_states()
-            # resample beta_mixture_variables
-            self.resample_beta_mixture_variables(ncores=ncores)
-            # resample transition variables
-            self.resample_p_initial()
-            self.resample_p_transition()
-            # resample emissions parameters
-            self.resample_beta_emission()
-            self.resample_p_emission()
-            
+        		current_posterior_probability = self.metropolis_sampling(ncores=ncores, 
+            						current_posterior_probability=current_posterior_probability)
 
-            # update computation-heavy statistics
-            likelihood_curr = self.calculate_loglikelihood()
+        	elif sampling_type == "gibbs":
 
+        		current_posterior_probability = self.gibbs_sampling(ncores=ncores, 
+            						current_posterior_probability=current_posterior_probability
             # print iteration summary if required
             if verbose:
                 if i == burn_in:
@@ -1746,7 +1817,7 @@ class HDPHMM(object):
                 results["chain_loglikelihood"].append(self.calculate_chain_loglikelihood())
 
                 results["hyperparameters"].append(copy.deepcopy(self.hyperparameters))
-                results["beta_emission"].append(self.beta_emission)
+                results["omega"].append(self.omega)
                 results["beta_mixture_variables"].append(self.beta_mixture_variables)
                 results["parameters"].append({"p_initial": p_initial,
                 							"p_emission": p_emission,
