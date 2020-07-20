@@ -260,14 +260,12 @@ class Chain(object):
             # are greater than the aux_var u probabilities
             p_history[0] = {s: p_initial[s] * p_emission[s][emission_sequence[0]] if p_initial[s] > auxiliary_vars[0] else 0 for s in states}
 
-            ### FORWARD RECURSION ###
             # for remaining states, probabilities are function of emission and transition
             for t in range(1, seqlen):
             
                 # p_temp for s2 = sum(p(s1)) for all states s1 * p(o_t2|s2) for all states s2 where p(s2|s1) > u_t2
                 # Note: We're using the actual emissions from the chain for t2
                 # Note: No need for an 'else 0' since we just don't include instances where transition is less than aux to the sum
-                ### RETURN TO THIS ### need to multiply previous state prob by transition prob
                 p_temp = {s2: sum(p_history[t - 1][s1] * p_transition[s1][s2] for s1 in states if p_transition[s1][s2] > auxiliary_vars[t])
                 * p_emission[s2][emission_sequence[t]] for s2 in states}
             
@@ -303,14 +301,12 @@ class Chain(object):
             p_history[0] = {s: p_initial[s] * norm.pdf(emission_sequence[0], p_emission[s]['location'], p_emission[s]['scale']) \
                 if p_initial[s] > auxiliary_vars[0] else 0 for s in states}
 
-            ### FORWARD RECURSION ###
             # for remaining states, probabilities are function of emission and transition
             for t in range(1, seqlen):
             
                 # p_temp for s2 = sum(p(s1)) for all states s1 * p(o_t2|s2) for all states s2 where p(s2|s1) > u_t2
                 # Note: We're using the actual emissions from the chain for t2
                 # Note: No need for an 'else 0' since we just don't include instances where transition is less than aux to the sum
-                ### RETURN TO THIS ### need to multiply previous state prob by transition prob
                 p_temp = {s2: sum(p_history[t - 1][s1] * p_transition[s1][s2] for s1 in states if p_transition[s1][s2] > auxiliary_vars[t])
                 * norm.pdf(emission_sequence[t], p_emission[s2]['location'], p_emission[s2]['scale']) for s2 in states}
 

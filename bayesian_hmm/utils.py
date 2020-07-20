@@ -54,6 +54,7 @@ def dirichlet_process_generator(alpha: Numeric = 1,
     # this should not be the case, since output_generator = self.state_generator
     if output_generator is None:
 
+        # generate increasing integers starting at 0
         output_generator = itertools.count(start=0, step=1)
     
     count = 0
@@ -62,14 +63,18 @@ def dirichlet_process_generator(alpha: Numeric = 1,
     while True:
 
         # if draw from unif(0,1) greater than ratio of count to count + alpha param, 
-        # we generate a new state
-        # Note: The larger alpha prior is, the more likely we will draw new states 
+        # we generate a new state from self.state_generator
+        # Note: The larger the alpha prior is, the more likely we will draw new values 
         if random.uniform(0, 1) > (count / (count + alpha)):
 
+            # generate the next state from self.state_generator
             val = next(output_generator)
+            # assign a weight of 1 to the generated state 
             weights[val] = 1
 
-        # otherwise, we will continue to reinforce existing states 
+        # otherwise, we will continue to reinforce existing states importance by randomly drawing 
+        # one of said states in proportion to its weight, adding to that weight, and 
+        # ultimately yielding that state instead of a new one 
         else:
 
             val = np.random.choice(list(weights.keys()), 1, p=list(x / count for x in weights.values()))[0]
@@ -77,8 +82,7 @@ def dirichlet_process_generator(alpha: Numeric = 1,
         
         count += 1
         
-        # we yield the state we brew (be it brand new or one previously generated)
-        # Note: I don't see how already removed states would be removed from 
+        # we yield the state we drew (be it brand new or one previously generated
         # and the originally initialised states would be icnorporated into the weights dict
         yield val
 

@@ -58,9 +58,9 @@ class HDPHMM(object):
     def __init__(self,
                  emission_sequences: Iterable[List[Optional[str]]],
                  emissions=None, 
-                 state_distribution="dirichlet",
+                 emissions_distribution="dirichlet",
                  independent_states=True,
-                 conjugate_state_priors=True,
+                 conjugate_emissions_priors=True,
                  sticky: bool = True,
                  priors: Dict[str, Callable[[], Any]] = None) -> None:
         
@@ -121,7 +121,7 @@ class HDPHMM(object):
         self.sticky = sticky
 
         # class variable for the determining prior distribution for the hidden states
-        self.state_distribution = state_distribution
+        self.emissions_distribution = emissions_distribution
 
         # whether hidden states can be correlated.
         # if starts are correlated, results in wishart prior 
@@ -133,14 +133,14 @@ class HDPHMM(object):
         # whether to use conjugate priors for hidden state distributions 
         # if false, we use a sample technique
         # default is true
-        self.conjugate_state_priors = conjugate_state_priors
+        self.conjugate_emissions_priors = conjugate_emissions_priors
 
-        ### RETURN TO THIS ###
+        # update priors if we're re-initialising 
         if priors is not None:
             self.priors.update(priors)
 
         # store hyperparameter priors lambda functions
-        if self.state_distribution == "dirichlet":
+        if self.emissions_distribution == "dirichlet":
 
             self.priors = {"alpha": lambda: np.random.gamma(2, 2),
                 "gamma": lambda: np.random.gamma(3, 3),
@@ -148,10 +148,10 @@ class HDPHMM(object):
                 "zeta": lambda: np.random.gamma(3, 3),
                 "kappa": lambda: np.random.beta(1, 1)}
 
-        elif self.state_distribution == "univariate_gaussian":
+        elif self.emissions_distribution == "univariate_gaussian":
 
 
-            if self.independent_states and self.conjugate_state_priors:
+            if self.independent_states and self.conjugate_emissions_priors:
 
             	# if states are uncorrelated and we want to use the 
         		# conjugate state priors to determine posterior params 
@@ -181,61 +181,56 @@ class HDPHMM(object):
             if priors is not None and "kappa" in priors:
                 raise ValueError("`sticky` is False, but kappa prior function given")
 
-        # make initial draw from priors
-        self.hyperparameters = {param: prior() for param, prior in self.priors.items()}
-
-        # use internal properties to store counts, initialize to zero
-        ### the number of times a state is the initial state of the sequence
+        ### class variables for counts per state, 'None' state initialized to zero ###
+        # number of times a state is the initial state of the sequence
         self.n_initial: InitDict 
         self.n_initial = {None: 0}
-        ### the number times an emission <value> is categorized as a particular state <key>
+        # number times an emission <value> is categorized as a particular state <key>
         self.n_emission: NestedInitDict
         self.n_emission = {None: {None: 0}}
-        ### number of transitions from state <key> to state <value>
+        # number of transitions from state <key> to state <value>
         self.n_transition: NestedInitDict
         self.n_transition = {None: {None: 0}}
 
-        # use internal properties to store current state for probabilities, initialize to one
-        ### probability that each state is the initial state
+        ### class variables for initial, transition, and emissions probabilities per state, 'None' state initialized to one ###
+        # probability that each state is the initial state
         self.p_initial: InitDict
         self.p_initial = {None: 1}
-        ### the probability that a particular emission <value> belongs to each state <key>
-        if self.state_distribution == "dirichlet":
-            self.p_emission: NestedInitDict
-            self.p_emission = {None: {None: 1}}
-        elif self.state_distribution == "univariate_gaussian":
-            self.p_emission: InitDict
-            self.p_emission = {}
-
-        # use internal properties to store conjugate prior params for each state
-        if self.independent_states and self.conjugate_state_priors and self.state_distribution == "univariate_gaussian":
-        	self.state_conjugate_prior_params = {}
-
-        ### the probability of transitioning from state <key> to state <value>
+        # the probability of transitioning from state <key> to state <value>
         self.p_transition: NestedInitDict
         self.p_transition = {None: {None: 1}}
-
-        # store derived parameters
-        ### RETURN TO THIS ###
-        self.auxiliary_transition_variables: NestedInitDict
-        self.auxiliary_transition_variables = {None: {None: 0}}
-        ### possibly beta outputs of Dirichlet stick-breaking ???
+        # probability that a particular emission <value> belongs to each state <key>
+        if self.emissions_distribution == "dirichlet":
+            self.p_emission: NestedInitDict
+            self.p_emission = {None: {None: 1}}
+        elif self.emissions_distribution == "univariate_gaussian":
+            self.p_emission: InitDict
+            self.p_emission = {}
+            # to store emissions conjugate prior params for each state
+            if self.independent_states and self.conjugate_emissions_priors:
+            	self.emissions_conjugate_prior_params = {}
+        
+        ### class variables for state mixing frequencies, 'None' state initial to one ###
         self.beta_mixture_variables: InitDict
         self.beta_mixture_variables = {None: 1}
-        ### RETURN TO THIS ###
+
+        ### class variable for derived posterior parameters for beta_mixing prior, 'None' state initialized to zero ###
+        ### see aux transition resampling techniques below ###
+        self.auxiliary_transition_variables: NestedInitDict
+        self.auxiliary_transition_variables = {None: {None: 0}}
+        
+        ### class variable drawn from Dirichlet prior for probability of individual emissions ###
+        ### used when self.emissions_distribution == 'dirichlet' ###
         self.omega: InitDict
         self.omega = {None: 1}
 
-        ### RETURN TO THIS ###
-        # states & emissions
-        # TODO: figure out emissions's type...
+        # set emissions variables as set from c.emissions_sequence
         if emissions is None:
-            emissions = functools.reduce(  # type: ignore
+            emissions = functools.reduce(  
                 set.union, (set(c.emission_sequence) for c in self.chains), set())
         elif not isinstance(emissions, set):
             raise ValueError("emissions must be a set")
-        
-        self.emissions = emissions  # type: ignore
+        self.emissions = emissions 
         self.states: Set[Optional[str]] = set()
 
         # generate non-repeating character labels for latent states
@@ -254,7 +249,6 @@ class HDPHMM(object):
         
         return self._initialised
 
-    ### RETURN TO THIS ###
     @initialised.setter
     def initialised(self, value: Any) -> None:
         
@@ -341,35 +335,32 @@ class HDPHMM(object):
 
             
             """
-            update counts with zeros (we assume update_counts() called later)
-            state irrelevant for constant count (all zeros)
+            update counts for new state with zeros (we assume update_counts() called later)
             """
-            ### RETURN TO THIS ### do we want transitions to None and from None???
-            ### number of times new state is initial state = 0
+
+            # number of times new state is initial state = 0
             self.n_initial[label] = 0
-            ### n_transitions from new state to all other states = 0
+            # number of transitions from new state to all other states = 0
             self.n_transition[label] = {s: 0 for s in self.states.union({label, None})}
-            ### n_transitions from all other states to new state = 0
-            for s in self.states:
-                
+            # number of transitions from all other states to new state = 0
+            for s in self.states.union({label, None})
                 self.n_transition[s].update({label: 0})
-            ### the number of emissions belong to the new state = 0
-            if self.state_distribution == "dirichlet":
-                self.n_emission[label] = {e: 0 for e in self.emissions}
+            # number of emissions belonging to the new state = 0
+            if self.emissions_distribution == "dirichlet":
+            	self.n_emission[label] = {e: 0 for e in self.emissions}
             # we don't care about per-state emissions counts in this case 
-            elif self.state_distribution == "univariate_gaussian":
-                pass
+            elif self.emissions_distribution == "univariate_gaussian":
+            	pass
             
 
             """
-            update auxiliary transition variables
+            update auxiliary transition variables for new state
             """
             
-            ### aux_transitions from new state to all other states = 1
+            # aux_transitions from new state to all other states = 1
             self.auxiliary_transition_variables[label] = {s2: 1 for s2 in list(self.states) + [label, None]}
-            ### aux_transitions from all other states to new state = 1
-            for s1 in self.states:
-                
+            # aux_transitions from all other states to new state = 1
+            for s1 in self.states:   
                 self.auxiliary_transition_variables[s1][label] = 1
                
 
@@ -377,20 +368,22 @@ class HDPHMM(object):
             update beta_mixture_variables values via Dirichlet stick-breaking
             """
             
-            ### Dirichlet stick-breaking: produce temp beta value using beta(1, gamma) from gamma prior
+            # produce temp beta value using beta(1, gamma) from gamma prior
             temp_beta = np.random.beta(1, self.hyperparameters["gamma"])
-            ### new beta for new state = temp_beta * old beta for None
+            # new beta for new state = temp_beta * old beta for 'None' state
             self.beta_mixture_variables[label] = temp_beta * self.beta_mixture_variables[None]
-            ### new beta for None = (1 - temp_beta) * old beta for None
+            # new beta for 'None' state = (1 - temp_beta) * old beta for 'None' state
             self.beta_mixture_variables[None] = (1 - temp_beta) * self.beta_mixture_variables[None]
 
 
-            ### RETURN TO THIS ###: Is this really how we determine initial state prob?
             """
-            similarly, update initial state probabilities via Dirichlet stick-breaking
+            update p_initial (initial state probabilities) via Dirichlet stick-breaking
             """
-            
-            temp_p_initial = np.random.beta(1, self.hyperparameters["gamma"])
+
+            # note: using a different parameter for this stick-breaking process than for the previous one
+            # note also: I decide to make this its own stick-brekaing process so that these initial probability
+            # frequencies can stand apart from the beta_mixing frequencies
+            temp_p_initial = np.random.beta(1, self.hyperparameters["alpha"])
             self.p_initial[label] = temp_p_initial * self.p_initial[None]
             self.p_initial[None] = (1 - temp_p_initial) * self.p_initial[None]
             
@@ -398,13 +391,15 @@ class HDPHMM(object):
             """
             update transition probabilities from new state to other states via Dirichlet process
             """
-            
-            ### RETURN TO THIS ### do we not want to factor in alpha's and kappas here?
-            ### transition probabilities from new state to other states based on beta_mixture_variables (i.e. average transition probabilities)
-            temp_p_transition = np.random.dirichlet([self.beta_mixture_variables[s] for s in list(self.states) + [label, None]]) 
-            ### zipping state names and resulting transition probabilities
+           
+            # transition probabilities from new state to other states based on beta_mixture_variables (i.e. average transition probabilities)
+            temp_p_transition = np.random.dirichlet([self.beta_mixture_variables[s] * self.hyperparameters["alpha"] \
+            											+ self.hyperparameters["kappa"] for s in list(self.states) + [label, None] \
+            											if label == s else \
+            											self.beta_mixture_variables[s] * self.hyperparameters["alpha"]]) 
+            # zipping state names and resulting transition probabilities
             p_transition_label = dict(zip(list(self.states) + [label, None], temp_p_transition))
-            ### adding shrunk probabilities to p_transition under key of the new state
+            # adding shrunk probabilities to p_transition under key of the new state
             self.p_transition[label] = shrink_probabilities(p_transition_label, eps)
             
 
@@ -412,7 +407,7 @@ class HDPHMM(object):
             update transitions from other states into new state via Dirichlet stick-breaking
             """
             
-            ### iterate through all states, notably excluding the new state
+            # iterate through all states, notably excluding the new state
             for state in self.states.union({None}):
                 
                 ### draw from gamma prior
@@ -427,27 +422,27 @@ class HDPHMM(object):
             update emission probabilities
             """
             
-            if self.state_distribution == "dirichlet":
+            if self.emissions_distribution == "dirichlet":
 
-                ### Dirichlet process for creating emissions probabilities for each possible emission for each state 
+                # Dirichlet process for creating emissions probabilities for each possible emission for each state 
                 temp_p_emission = np.random.dirichlet([self.hyperparameters["alpha"] * self.omega[e] for e in self.emissions])
-                ### for the new state, zip resulting emissions probability with the emission itself
+                # for the new state, zip resulting emissions probability with the emission itself
                 self.p_emission[label] = dict(zip(self.emissions, temp_p_emission))
 
-            elif self.state_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_state_priors:
+            elif self.emissions_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_emissions_priors:
 
-            	# new states get the same initial prior params 
-            	self.state_conjugate_prior_params.update({label: {"NG_mu": self.priors["NG_mu_initial"],
+            	# new states get the same initial prior parameters
+            	self.emissions_conjugate_prior_params.update({label: {"NG_mu": self.priors["NG_mu_initial"],
             														"NG_lambda": self.priors["NG_lambda_initial"],
             														"NG_alpha": self.priors["NG_alpha_initial"], 
             														"NG_beta": self.priors["NG_beta_initial"]}})
                 
-                # make a draw from the normal-gamma prior to get means and variances for gaussian state rvs
+                # make a draw from the normal-gamma prior to get means and variances for gaussian state random variables
                 # and append them to existing dict
-                self.p_emission.update({label: dict(zip(("mu", "sigma"), normal_gamma_rvs(self.state_conjugate_prior_params[label]["NG_mu"], 
-                                           self.state_conjugate_prior_params[label]["NG_lambda"], 
-                                           self.state_conjugate_prior_params[label]["NG_alpha"], 
-                                           self.state_conjugate_prior_params[label]["NG_beta"], 
+                self.p_emission.update({label: dict(zip(("mu", "sigma"), normal_gamma_rvs(self.emissions_conjugate_prior_params[label]["NG_mu"], 
+                                           self.emissions_conjugate_prior_params[label]["NG_lambda"], 
+                                           self.emissions_conjugate_prior_params[label]["NG_alpha"], 
+                                           self.emissions_conjugate_prior_params[label]["NG_beta"], 
                                            size=1)[0]))})
 
             # save generated label to state dict
@@ -473,23 +468,22 @@ class HDPHMM(object):
         states = [next(self._label_generator) for _ in range(k)]
         self.states = set(states)
 
-        ### RETURN TO THIS ### already did this above???
-        # create dict of hyperparams drawn from priors
-        #self.hyperparameters = {param: prior() for param, prior in self.priors.items()}
+        # make initial draw from priors
+        self.hyperparameters = {param: prior() for param, prior in self.priors.items()}
 
         # initialise chains: creates randomly initialised hidden state sequence for each emission sequence/chain
         for c in self.chains:
             c.initialise(states)
 
-        # initialise hierarchical priors
+        ### initialise mixture variables ###
         
-        ### order L weak limit approximation to the Dirichlet process mixture where L = self.k in this case 
+        # 'order L weak limit approximation' (Fox 2009) to the Dirichlet process mixture where L = self.k in this case 
         temp_beta = sorted(np.random.dirichlet([self.hyperparameters["gamma"] / (self.k + 1)] * (self.k + 1)), reverse=True)
-        ### create dictionary of beta_mixture_variables with corresponding state names
+        # create dictionary of beta_mixture_variables with corresponding state names
         beta_mixture_variables = dict(zip(list(self.states) + [None], temp_beta))
-        ### and shrink probabilities
+        # store shrunken probabilities to class variable
         self.beta_mixture_variables = shrink_probabilities(beta_mixture_variables)
-        ### set aux_transition from each state to each other equal to 1
+        # set aux_transition from each state to each other equal to one
         self.auxiliary_transition_variables = {s1: {s2: 1 for s2 in self.states.union({None})} for s1 in self.states.union({None})}
 
         # update counts before resampling
@@ -497,9 +491,10 @@ class HDPHMM(object):
 
         # resample remaining hyperparameters
         self.resample_beta_mixture_variables()
-        self.resample_omega()
         self.resample_p_initial()
         self.resample_p_transition()
+        if self.emission_distribution == 'dirichlet':
+        	self.resample_omega()
         self.resample_p_emission()
 
         # update initialised flag
@@ -551,10 +546,10 @@ class HDPHMM(object):
         # set n_initial, n_emission, and n_transition objects (NOT their corresponding class objects) to 0 for each state 
         n_initial = {s: 0 for s in self.states.union({None})}
         n_transition = {s1: {s2: 0 for s2 in self.states.union({None})} for s1 in self.states.union({None})}
-        if self.state_distribution == "dirichlet":
+        if self.emissions_distribution == "dirichlet":
             # sum number of instances of each emission per state if we use dirichlet process prior for state distribution 
             n_emission = {s: {e: 0 for e in self.emissions} for s in self.states.union({None})}
-        elif self.state_distribution == "univariate_gaussian":
+        elif self.emissions_distribution == "univariate_gaussian":
             # sum number of instances of each emission overall if we use gaussian prior for state distributions 
             # since we're only concerned with the overall frequency of each emission 
             n_emissions = {e: 0 for e in self.emissions}
@@ -567,18 +562,18 @@ class HDPHMM(object):
             n_initial[chain.latent_sequence[0]] += 1
 
             # increment n_emissions only for final state-emission pair
-            if self.state_distribution == "dirichlet":
+            if self.emissions_distribution == "dirichlet":
                 n_emission[chain.latent_sequence[chain.T - 1]][chain.emission_sequence[chain.T - 1]] += 1
-            elif self.state_distribution == "univariate_gaussian":
+            elif self.emissions_distribution == "univariate_gaussian":
                 n_emission[chain.emission_sequence[chain.T - 1]] += 1
 
             # increment all n_transitions and n_emissions within chain
             for t in range(chain.T - 1):
                 
                 # within chain emissions
-                if self.state_distribution == "dirichlet":
+                if self.emissions_distribution == "dirichlet":
                     n_emission[chain.latent_sequence[t]][chain.emission_sequence[t]] += 1
-                elif self.state_distribution == "univariate_gaussian":
+                elif self.emissions_distribution == "univariate_gaussian":
                     n_emission[chain.emission_sequence[t]] += 1
                 # within chain transitions
                 n_transition[chain.latent_sequence[t]][chain.latent_sequence[t + 1]] += 1
@@ -1301,7 +1296,7 @@ class HDPHMM(object):
         """
         
         # for each state, get the number of emissions weighted by omega and alpha param
-        if self.state_distribution == "dirichlet":    
+        if self.emissions_distribution == "dirichlet":    
 
             dir_posterior_params_emissions_per_state = {e: self.n_emission[state][e] 
                 + self.hyperparameters["phi"] * self.omega[e]
@@ -1309,13 +1304,13 @@ class HDPHMM(object):
         
             return dir_posterior_params_emissions_per_state
 
-        elif self.state_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_state_priors:
+        elif self.emissions_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_emissions_priors:
 
             # get conjugate prior params
-            NG_mu_0 = self.state_conjugate_prior_params[state]["NG_mu"]
-            NG_lambda_0 = self.state_conjugate_prior_params[state]["NG_lambda"]
-            NG_alpha_0 = self.state_conjugate_prior_params[state]["NG_alpha"]
-            NG_beta_0 = self.state_conjugate_prior_params[state]["NG_beta"]
+            NG_mu_0 = self.emissions_conjugate_prior_params[state]["NG_mu"]
+            NG_lambda_0 = self.emissions_conjugate_prior_params[state]["NG_lambda"]
+            NG_alpha_0 = self.emissions_conjugate_prior_params[state]["NG_alpha"]
+            NG_beta_0 = self.emissions_conjugate_prior_params[state]["NG_beta"]
             # number of emissions corresponding to the relevant state
             sample_size = sum(hmm_array[:,1] == state)
             # sample variance of emissions corresponding to the relevant state 
@@ -1329,11 +1324,11 @@ class HDPHMM(object):
             NG_alpha_n = NG_alpha_0 + (sample_size/2)
             NG_beta_n = NG_beta_0 + .5 * sample_variance + ((NG_lambda_0*sample_size*(sample_mean-NG_mu_0)**2) / (2*(NG_lambda_0 + sample_size)))
 
-            # update state_conjugate_prior_params for the state with new posterior params 
-            self.state_conjugate_prior_params[state]["NG_mu"] = NG_mu_n
-            self.state_conjugate_prior_params[state]["NG_lambda"] = NG_lambda_n
-            self.state_conjugate_prior_params[state]["NG_alpha"] = NG_alpha_n
-            self.state_conjugate_prior_params[state]["NG_beta"] = NG_beta_n
+            # update emissions_conjugate_prior_params for the state with new posterior params 
+            self.emissions_conjugate_prior_params[state]["NG_mu"] = NG_mu_n
+            self.emissions_conjugate_prior_params[state]["NG_lambda"] = NG_lambda_n
+            self.emissions_conjugate_prior_params[state]["NG_alpha"] = NG_alpha_n
+            self.emissions_conjugate_prior_params[state]["NG_beta"] = NG_beta_n
 
 
     def resample_p_emission(self, eps=1e-12):
@@ -1344,7 +1339,7 @@ class HDPHMM(object):
         :return: None
         """
 
-        if self.state_distribution == "dirichlet":
+        if self.emissions_distribution == "dirichlet":
         
             # for each state, sample from the dirichlet posterior params corresponding to 
             # the multinomial emissions probabilities given that state
@@ -1360,7 +1355,7 @@ class HDPHMM(object):
             p_emission_none = dict(zip(list(params.keys()), np.random.dirichlet(list(params.values())).tolist()))
             self.p_emission[None] = shrink_probabilities(p_emission_none, eps)
 
-        elif self.state_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_state_priors:
+        elif self.emissions_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_emissions_priors:
 
         	hmm_array = self.tabulate()
         	# for each state, sample from the NG posterior params corresponding to
@@ -1368,16 +1363,16 @@ class HDPHMM(object):
         	for state in self.states: 
 
         		self._get_p_emission_posterior_parameters(state, hmm_array=hmm_array)
-        		self.p_emission.update({label: dict(zip(("mu", "sigma"), normal_gamma_rvs(self.state_conjugate_prior_params[state]["NG_mu"], 
-                                           self.state_conjugate_prior_params[state]["NG_lambda"], 
-                                           self.state_conjugate_prior_params[state]["NG_alpha"], 
-                                           self.state_conjugate_prior_params[state]["NG_beta"], 
+        		self.p_emission.update({label: dict(zip(("mu", "sigma"), normal_gamma_rvs(self.emissions_conjugate_prior_params[state]["NG_mu"], 
+                                           self.emissions_conjugate_prior_params[state]["NG_lambda"], 
+                                           self.emissions_conjugate_prior_params[state]["NG_alpha"], 
+                                           self.emissions_conjugate_prior_params[state]["NG_beta"], 
                                            size=1)[0]))})
 
 
     def calculate_p_emission_prior_log_density(self):
         
-        if self.state_distribution == "dirichlet":
+        if self.emissions_distribution == "dirichlet":
 
         	p_emission_prior_density = 0
 
@@ -1397,17 +1392,17 @@ class HDPHMM(object):
 
         	return p_emission_prior_density
 
-        elif self.state_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_state_priors:
+        elif self.emissions_distribution == "univariate_gaussian" and self.independent_states and self.conjugate_emissions_priors:
 
         	p_emission_prior_density = 0
 
         	for state in self.states:
 
         		p_emission_prior_density += normal_gamma_pdf((self.p_emission[state]["mu"],self.p_emission[state]["sigma"]),
-        																	self.state_conjugate_prior_params[state]["NG_mu"],
-        																	self.state_conjugate_prior_params[state]["NG_lambda"],
-        																	self.state_conjugate_prior_params[state]["NG_alpha"],
-        																	self.state_conjugate_prior_params[state]["NG_beta"])
+        																	self.emissions_conjugate_prior_params[state]["NG_mu"],
+        																	self.emissions_conjugate_prior_params[state]["NG_lambda"],
+        																	self.emissions_conjugate_prior_params[state]["NG_alpha"],
+        																	self.emissions_conjugate_prior_params[state]["NG_beta"])
 
         		return p_emission_prior_density
 
@@ -1516,14 +1511,9 @@ class HDPHMM(object):
         and not on the probabilities of the hyperparameters.
         :return:
         """
-        ### RETURN TO THIS ### not sure why we're negating
-        """
-        return sum(chain.calculate_chain_loglikelihood(self.p_initial, self.p_emission, self.p_transition, self.state_distribution)
-            for chain in self.chains)
-		"""
 
         return chain.calculate_chain_loglikelihood(self.p_initial, self.p_emission, self.p_transition,
-        										self.n_initial, self.n_transition, self.state_distribution,
+        										self.n_initial, self.n_transition, self.emissions_distribution,
         										self.chains, self.states)
 
     def calculate_posterior_probability(self):
@@ -1566,7 +1556,7 @@ class HDPHMM(object):
             								p_initial=copy.deepcopy(p_initial),
             								p_emission=copy.deepcopy(p_emission),
             								p_transition=copy.deepcopy(p_transition),
-                                            state_distribution=self.state_distribution)
+                                            emissions_distribution=self.emissions_distribution)
 
         # parallel process beam resampling of latent states 
         ### RETURN TO THIS: each chain gets its separate process?###
@@ -1580,8 +1570,7 @@ class HDPHMM(object):
             self.chains[i].latent_sequence = new_latent_sequences[i]
 
         # call generator only on the Nones in the resampled latent sequences in order to assign new states to Nones
-        # TODO: parameter check if we should be using alpha or gamma as parameter ### RETURN TO THIS: think this should be alpha
-        state_generator = dirichlet_generator(self.hyperparameters["alpha"], output_generator=self.state_generator())
+        state_generator = dirichlet_generator(self.hyperparameters["gamma"], output_generator=self.state_generator())
         for chain in self.chains:
             
             chain.latent_sequence = [s if s is not None else next(state_generator) for s in chain.latent_sequence]
@@ -1633,7 +1622,7 @@ class HDPHMM(object):
         self.resample_p_initial()
         self.resample_p_transition()
         # 4. resample emissions parameters
-        if self.state_distribution == "dirichlet":
+        if self.emissions_distribution == "dirichlet":
         	self.resample_omega()
         else:
            	continue
@@ -1696,7 +1685,7 @@ class HDPHMM(object):
         	self.resample_p_initial()
         	self.resample_p_transition()
         	# 4. resample emissions parameters
-        	if self.state_distribution == "dirichlet":
+        	if self.emissions_distribution == "dirichlet":
         		self.resample_omega()
         	else:
            		continue
@@ -1780,7 +1769,9 @@ class HDPHMM(object):
         	elif sampling_type == "gibbs":
 
         		current_posterior_probability = self.gibbs_sampling(ncores=ncores, 
-            						current_posterior_probability=current_posterior_probability
+            						current_posterior_probability=current_posterior_probability)
+
+
             # print iteration summary if required
             if verbose:
                 if i == burn_in:
